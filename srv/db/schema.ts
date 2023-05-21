@@ -32,6 +32,7 @@ export namespace AppSchema {
     novelApiKey: string
     novelModel: string
     novelVerified?: boolean
+    useLocalPipeline: boolean
 
     koboldUrl: string
     thirdPartyFormat: 'kobold' | 'openai' | 'claude'

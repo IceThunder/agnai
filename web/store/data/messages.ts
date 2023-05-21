@@ -16,6 +16,7 @@ export const msgsApi = {
   getPromptEntities,
   generateResponseV2,
   deleteMessages,
+  createActiveChatPrompt,
 }
 
 export async function editMessage(msg: AppSchema.ChatMessage, replace: string) {
@@ -79,30 +80,13 @@ export async function generateResponseV2(opts: GenerateOpts) {
     return createMessage(active.chat._id, opts)
   }
 
-  const props = await getGenerateProps(opts, active).catch((err: Error) => err)
-  if (props instanceof Error) {
-    return localApi.error(props.message)
+  const activePrompt = await createActiveChatPrompt(opts).catch((err) => err)
+  if (activePrompt instanceof Error) {
+    return localApi.error(activePrompt.message)
   }
 
-  const entities = props.entities
+  const { prompt, props, entities } = activePrompt
 
-  const encoder = await getEncoder()
-  const prompt = createPrompt(
-    {
-      char: entities.char,
-      chat: entities.chat,
-      user: entities.user,
-      members: entities.members.concat([entities.profile]),
-      continue: props?.continue,
-      book: entities.book,
-      retry: props?.retry,
-      settings: entities.settings,
-      messages: props.messages,
-      replyAs: props.replyAs,
-      characters: entities.characters,
-    },
-    encoder
-  )
   if (ui?.logPromptsToBrowserConsole) {
     console.log(`=== Sending the following prompt: ===`)
     console.log(`${prompt.parts.gaslight}\n${prompt.lines.join('\n')}\n${prompt.post}`)
@@ -135,6 +119,41 @@ export async function generateResponseV2(opts: GenerateOpts) {
 
   const res = await api.post(`/chat/${entities.chat._id}/generate`, request)
   return res
+}
+
+async function createActiveChatPrompt(
+  opts: Exclude<GenerateOpts, { kind: 'ooc' | 'send-noreply' }>,
+  maxContext?: number
+) {
+  const { active } = chatStore()
+
+  if (!active) {
+    throw new Error('No active chat. Try refreshing')
+  }
+
+  const props = await getGenerateProps(opts, active)
+
+  const entities = props.entities
+
+  const encoder = await getEncoder()
+  const prompt = createPrompt(
+    {
+      char: entities.char,
+      chat: entities.chat,
+      user: entities.user,
+      members: entities.members.concat([entities.profile]),
+      continue: props?.continue,
+      book: entities.book,
+      retry: props?.retry,
+      settings: entities.settings,
+      messages: props.messages,
+      replyAs: props.replyAs,
+      characters: entities.characters,
+    },
+    encoder,
+    maxContext
+  )
+  return { prompt, props, entities }
 }
 
 type GenerateProps = {

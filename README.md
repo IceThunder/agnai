@@ -29,6 +29,9 @@ Agnaistic is bundled as an NPM package and can be installed globally:
 # View launch options:
 > agnai help
 
+# Run with the pipeline features
+> agnai --pipeline
+
 ```
 
 When using the NPM package, your images and JSON files will be stored in: `HOME_FOLDER/.agnai`.  
@@ -36,7 +39,7 @@ E.g. `/home/sceuick/.agnai/json` `/home/sceuick/.agnai/assets`
 
 ## Features
 
-- **Group Conversations**: Multiple users with one character/bot
+- **Group Conversations**: One or more users with one or more characters
 - **Multiple AI services**: Support for Kobold, Novel, AI Horde, LuminAI, OpenAI, Claude
 - Multiple persona schema formats: W++, Square bracket format (SBF), Boostyle, Plain text
 - Multi-tenancy:
@@ -44,6 +47,9 @@ E.g. `/home/sceuick/.agnai/json` `/home/sceuick/.agnai/assets`
   - User settings: Which AI service to use and their own settings
   - User generation settings
 - Chat specific overrides: AI Service, Character, Generation Settings
+- **Optional pipeline features**
+  - Text summarization for images
+  - TODO: Long-term memory, image captioning, text-to-speech, ...
 
 ## Running with Docker
 
@@ -144,6 +150,11 @@ The important parts of the stack are:
 
 # Windows
 > npm run start:win
+
+# Install and run pipeline API
+> npm run model:init  # Install poetry into a virtual environment
+> npm run model:deps  # Install/update poetry dependencies
+> npm run model:start # Start the pipeline API
 ```
 
 ### Recommended Developer Tooling
@@ -154,6 +165,8 @@ The important parts of the stack are:
   - The `pnpm start` script launchs the NodeJS API using the `--inspect` flag
   - Attach using the default launch task in VSCode (`F5`)
   - Or go to the url `chrome://inspect` to use the debugger
+- Python dependency management using `Poetry` - https://python-poetry.org/docs/cli
+  - `.model/bin/poetry [...args]`
 
 ### Format and Type Checking
 

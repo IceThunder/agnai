@@ -64,7 +64,7 @@ export const SELF_REPLACE = /(\{\{user\}\}|<USER>)/gi
  * @param opts
  * @returns
  */
-export function createPrompt(opts: PromptOpts, encoder: Encoder) {
+export function createPrompt(opts: PromptOpts, encoder: Encoder, maxContext?: number) {
   const sortedMsgs = opts.messages
     .filter((msg) => msg.adapter !== 'image')
     .slice()
@@ -76,7 +76,14 @@ export function createPrompt(opts: PromptOpts, encoder: Encoder) {
    */
   const lines = getLinesForPrompt(opts, encoder)
   const parts = getPromptParts(opts, lines, encoder)
-  const { pre, post, history, prompt } = buildPrompt(opts, parts, lines, 'desc', encoder)
+  const { pre, post, history, prompt } = buildPrompt(
+    opts,
+    parts,
+    lines,
+    'desc',
+    encoder,
+    maxContext
+  )
   return { prompt, lines: lines.reverse(), pre, post, parts, history }
 }
 
@@ -114,7 +121,8 @@ export function buildPrompt(
   parts: PromptParts,
   incomingLines: string[],
   order: 'asc' | 'desc',
-  encoder: Encoder
+  encoder: Encoder,
+  callerMaxContext?: number
 ) {
   const lines = order === 'asc' ? incomingLines.slice().reverse() : incomingLines.slice()
   const { chat, char } = opts
@@ -156,7 +164,7 @@ export function buildPrompt(
   }
 
   const { adapter, model } = getAdapter(opts.chat, opts.user, opts.settings)
-  const maxContext = getContextLimit(opts.settings, adapter, model)
+  const maxContext = callerMaxContext || getContextLimit(opts.settings, adapter, model)
 
   const preamble = pre.join('\n').replace(BOT_REPLACE, char.name).replace(SELF_REPLACE, sender)
   const postamble = parts.post.join('\n')
