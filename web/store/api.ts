@@ -102,8 +102,10 @@ async function callApi<T = any>(
   const json = await res.json()
 
   if (res.status === 401) {
-    events.emit(EVENTS.sessionExpired)
-    toastStore.error(`Your session has expired. Please login again.`)
+    if (isLoggedIn()) {
+      events.emit(EVENTS.sessionExpired)
+      toastStore.error(`Your session has expired. Please login again.`)
+    }
     return {
       result: undefined,
       status: 401,
