@@ -4,10 +4,9 @@ import fs, { readFileSync } from 'fs'
 import { init } from '@dqbd/tiktoken/lite/init'
 import { encoding_for_model } from '@dqbd/tiktoken'
 import { AIAdapter, NOVEL_MODELS, OPENAI_MODELS } from '../common/adapters'
-import gpt from 'gpt-3-encoder'
 import { resolve } from 'path'
 import * as nai from 'nai-js-tokenizer'
-import { logger } from './logger'
+import { logger } from './middleware'
 import { AppSchema, Encoder, TokenCounter, Tokenizer } from '/common/types'
 
 const claudeJson = readFileSync(resolve(__dirname, 'sp-models', 'claude.json'))
@@ -23,17 +22,12 @@ let qwen2Encoder: Tokenizer
 let llama3Encoder: Tokenizer
 let krake: Encoder
 let euterpe: Encoder
+let gemma: Encoder
 
 const davinciEncoder = encoding_for_model('text-davinci-003')
 const turboEncoder = encoding_for_model('gpt-3.5-turbo')
 
 const wasm = getWasm()
-
-const main: Encoder = {
-  encode: (value: string) => gpt.encode(value),
-  decode: (tokens) => gpt.decode(tokens),
-  count: (value: string) => gpt.encode(value).length,
-}
 
 let novel: Encoder
 let novelModern: Encoder
@@ -47,6 +41,12 @@ let cohere: Encoder
 let llama3: Encoder
 let qwen2: Encoder
 
+const main: Encoder = {
+  encode: (value: string) => Array.from(turboEncoder.encode(value)),
+  decode: (tokens) => turboEncoder.decode(Uint32Array.from(tokens)).toString(),
+  count: (value: string) => turboEncoder.encode(value).length,
+}
+
 export type EncoderType =
   | 'novel'
   | 'novel-modern'
@@ -59,6 +59,7 @@ export type EncoderType =
   | 'yi'
   | 'cohere'
   | 'qwen2'
+  | 'gemma'
 
 const TURBO_MODELS = new Set<string>([
   OPENAI_MODELS.Turbo,
@@ -72,7 +73,7 @@ const TURBO_MODELS = new Set<string>([
 export function getTokenCounter(
   adapter: AIAdapter | 'main',
   model: string | undefined,
-  sub?: AppSchema.SubscriptionPreset
+  sub?: AppSchema.SubscriptionModel
 ): TokenCounter {
   if (sub?.tokenizer) {
     const tokenizer = getEncoderByName(sub.tokenizer as EncoderType)
@@ -111,11 +112,15 @@ export function getEncoderByName(type: EncoderType) {
     case 'cohere':
       return cohere
 
-    case 'llama3':
-      return llama3
-
     case 'qwen2':
       return qwen2
+
+    case 'gemma':
+      return gemma
+
+    case 'llama3':
+    default:
+      return llama3
   }
 }
 
@@ -135,6 +140,7 @@ export function getEncoder(adapter: AIAdapter | 'main', model?: string): Encoder
   if (adapter === 'claude') return claude ?? main
 
   if (adapter === 'novel') {
+    if (model === NOVEL_MODELS['llama-3-erato-v1']) return llama3
     if (model === NOVEL_MODELS.kayra_v1) return novelModern
     if (model === NOVEL_MODELS.clio_v1) return novel
     if (model === NOVEL_MODELS.krake) return krake
@@ -189,6 +195,7 @@ export async function prepareTokenizers() {
     novelModern = createEncoder('novelai_v2.model')
     llama = createEncoder('llama.model')
     yi = createEncoder('yi.model')
+    gemma = createEncoder('gemma.model')
 
     await init((imports) => WebAssembly.instantiate(wasm!, imports))
     {

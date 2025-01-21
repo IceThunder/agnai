@@ -1,23 +1,24 @@
 import { Save, X } from 'lucide-solid'
-import { Component, createEffect, createMemo, createSignal, For, JSX, Show } from 'solid-js'
+import { Component, createEffect, createMemo, createSignal, JSX, on, onMount, Show } from 'solid-js'
 import { defaultPresets, isDefaultPreset } from '../../../common/presets'
 import { AppSchema } from '../../../common/types/schema'
 import Button from '../Button'
-import GenerationSettings, { getPresetFormData } from '../GenerationSettings'
 import { toastStore, userStore } from '../../store'
 import { presetStore } from '../../store'
-import { adapterSettings } from '../../../common/adapters'
 import { AutoPreset, getPresetOptions } from '../adapter'
 import ServiceWarning from '/web/shared/ServiceWarning'
 import { PresetSelect } from '/web/shared/PresetSelect'
 import { Card, TitleCard } from '/web/shared/Card'
 import { usePane } from '/web/shared/hooks'
 import TextInput from '/web/shared/TextInput'
+import PresetSettings from '/web/shared/PresetSettings'
+import { getPresetEditor, getPresetForm, PresetTab } from '../PresetSettings/types'
+import { ADAPTER_SETTINGS } from '../PresetSettings/settings'
 
 export const ModeGenSettings: Component<{
-  // chat: AppSchema.Chat
   onPresetChanged: (presetId: string) => void
   presetId: string | undefined
+  hideTabs?: PresetTab[]
   close?: () => void
   footer?: (children: JSX.Element) => void
 }> = (props) => {
@@ -28,6 +29,8 @@ export const ModeGenSettings: Component<{
     presets,
     options: presets.map((pre) => ({ label: pre.name, value: pre._id })),
   }))
+
+  const [store, setStore, hides] = getPresetEditor()
 
   const presetOptions = createMemo(() =>
     getPresetOptions(state.presets, { builtin: true, base: true })
@@ -50,16 +53,34 @@ export const ModeGenSettings: Component<{
     props.presetId || user.user?.defaultPreset || AutoPreset.service
   )
 
-  createEffect(() => {
-    if (!props.presetId) return
-    if (selected() !== props.presetId) {
-      setSelected(props.presetId)
-    }
-  })
+  createEffect(
+    on(
+      () => selected(),
+      (id) => {
+        if (!id) return
+        const preset = state.presets.find((p) => p._id === id)
+        if (preset) {
+          setStore(preset)
+        }
+      }
+    )
+  )
+
+  createEffect(
+    on(
+      () => props.presetId,
+      () => {
+        if (!props.presetId) return
+        if (selected() !== props.presetId) {
+          setSelected(props.presetId)
+        }
+      }
+    )
+  )
 
   const onSave = () => {
     const presetId = selected()
-    const update = getPresetFormData(ref)
+    const update = getPresetForm(store)
 
     if (isDefaultPreset(presetId)) {
       const original = defaultPresets[presetId] as AppSchema.GenSettings
@@ -70,9 +91,6 @@ export const ModeGenSettings: Component<{
        */
       if (!isPresetDirty(original, update as any)) {
         props.onPresetChanged(presetId)
-        // toastStore.success('Switched preset')
-        // chatStore.editChatGenPreset(props.chat._id, presetId, () => {
-        // })
         return
       }
 
@@ -101,17 +119,14 @@ export const ModeGenSettings: Component<{
         return
       }
 
-      presetStore.updatePreset(presetId, update as any, () => {
-        if (pane() === 'popup') {
-          props.close?.()
-        }
+      presetStore.updatePreset(presetId, update as any, {
+        onSuccess: () => {
+          if (pane() === 'popup') {
+            props.close?.()
+          }
+        },
       })
     }
-  }
-
-  const getPresetName = (presetId: string) => {
-    if (isDefaultPreset(presetId)) return `My ${defaultPresets[presetId].name} Preset`
-    return presets().find((pre) => pre._id === presetId)?.name || ''
   }
 
   const footer = (
@@ -125,7 +140,8 @@ export const ModeGenSettings: Component<{
       </Button>
     </>
   )
-  props.footer?.(footer)
+
+  onMount(() => props.footer?.(footer))
 
   const activePreset = createMemo(() => presets().find((pre) => pre._id === selected()))
 
@@ -150,16 +166,21 @@ export const ModeGenSettings: Component<{
             </TitleCard>
           </Show>
 
-          <TextInput fieldName="name" value={getPresetName(selected())} label="Preset Name" />
+          <TextInput
+            fieldName="name"
+            value={store.name}
+            label="Preset Name"
+            onChange={(ev) => setStore('name', ev.currentTarget.value)}
+          />
         </Card>
 
-        <For each={presets()}>
-          {(preset) => (
-            <Show when={selected() === preset._id!}>
-              <GenerationSettings inherit={preset} onSave={onSave} />
-            </Show>
-          )}
-        </For>
+        <PresetSettings
+          store={store}
+          setter={setStore}
+          hideTabs={props.hideTabs}
+          hides={hides}
+          noSave={false}
+        />
       </form>
     </div>
   )
@@ -180,7 +201,7 @@ function isPresetDirty(
 
     if (compare[prop] === undefined || original[prop] === undefined) continue
 
-    const usable: string[] | undefined = (adapterSettings as any)[prop]
+    const usable: string[] | undefined = (ADAPTER_SETTINGS as any)[prop]
 
     if (svc && usable && !usable.includes(svc)) continue
 

@@ -3,10 +3,11 @@ import './tailwind.css'
 import './app.css'
 import './dots.css'
 import '@melloware/coloris/dist/coloris.css'
-import { Component, createMemo, JSX, Show, lazy, onMount, Switch, Match } from 'solid-js'
+import './store'
+import { Component, createMemo, Show, lazy, onMount, Switch, Match } from 'solid-js'
 import { Route, Router, useLocation } from '@solidjs/router'
 import NavBar from './shared/NavBar'
-import Toasts from './Toasts'
+import Notifications from './Toasts'
 import CharacterRoutes from './pages/Character'
 import ScenarioRoutes from './pages/Scenario'
 import { settingStore } from './store/settings'
@@ -22,9 +23,9 @@ import Redirect from './shared/Redirect'
 import Maintenance from './shared/Maintenance'
 import CharacterChats from './pages/Character/ChatList'
 import ChatDetail from './pages/Chat/ChatDetail'
-import Settings from './pages/Settings'
+import Settings, { SettingsModal } from './pages/Settings'
 import ProfilePage, { ProfileModal } from './pages/Profile'
-import { usePaneManager } from './shared/hooks'
+import { useCharacterBg, usePaneManager } from './shared/hooks'
 import { rootModalStore } from './store/root-modal'
 import { For } from 'solid-js'
 import { css, getMaxChatWidth } from './shared/util'
@@ -32,7 +33,6 @@ import FAQ from './pages/Home/FAQ'
 import CreateChatForm from './pages/Chat/CreateChatForm'
 import Modal from './shared/Modal'
 import { ContextProvider } from './store/context'
-import PipelineGuide from './pages/Guides/Pipeline'
 import MemoryGuide from './pages/Guides/Memory'
 import NovelGuide from './pages/Guides/NovelAI'
 import { ImageModal } from './pages/Chat/ImageModal'
@@ -42,6 +42,7 @@ import SoundsPage from './pages/Sounds'
 import PatreonOauth from './pages/Settings/PatreonOauth'
 import { SagaDetail } from './pages/Saga/Detail'
 import { SagaList } from './pages/Saga/List'
+import { ImageSettingsModal } from './pages/Settings/Image/ImageSettings'
 
 const App: Component = () => {
   const state = userStore()
@@ -82,7 +83,6 @@ const App: Component = () => {
       </Route>
       <Route path="/privacy-policy" component={lazy(() => import('./pages/PrivacyPolicy'))} />
       <Route path="/guides">
-        <Route path="/pipeline" component={PipelineGuide} />
         <Route path="/memory" component={MemoryGuide} />
         <Route path="/novel" component={NovelGuide} />
       </Route>
@@ -103,7 +103,7 @@ const App: Component = () => {
           />
           <Route
             path="/admin/subscriptions/:id"
-            component={lazy(() => import('./pages/Admin/Subscription'))}
+            component={lazy(() => import('./pages/Admin/SubscriptionModel'))}
           />
           <Route
             path={['/admin/announcements', '/admin/announcements/:id']}
@@ -124,6 +124,7 @@ const App: Component = () => {
 const Layout: Component<{ children?: any }> = (props) => {
   const state = userStore()
   const cfg = settingStore()
+
   const location = useLocation()
   const pane = usePaneManager()
 
@@ -146,17 +147,7 @@ const Layout: Component<{ children?: any }> = (props) => {
     return location.pathname.startsWith('/chat/') || location.pathname.startsWith('/saga/')
   })
 
-  const bg = createMemo(() => {
-    const styles: JSX.CSSProperties = {
-      'background-image':
-        state.background && !cfg.anonymize ? `url(${state.background})` : undefined,
-      'background-repeat': 'no-repeat',
-      'background-size': 'cover',
-      'background-position': 'center',
-      'background-color': isChat() ? undefined : '',
-    }
-    return styles
-  })
+  const bgStyles = useCharacterBg('layout')
 
   return (
     <ContextProvider>
@@ -165,9 +156,19 @@ const Layout: Component<{ children?: any }> = (props) => {
         <NavBar />
         <div class="flex w-full grow flex-row overflow-y-hidden">
           <Navigation />
-          <main class="w-full overflow-y-auto" data-background style={bg()}>
+
+          <main
+            id="main-content"
+            class="w-full overflow-y-auto overflow-x-hidden"
+            classList={{
+              'sm:ml-[320px]': cfg.showMenu,
+              'sm:ml-0': !cfg.showMenu,
+            }}
+            data-background
+            style={{ ...bgStyles(), 'scrollbar-gutter': 'stable' }}
+          >
             <div
-              class={`mx-auto h-full min-h-full ${isChat() ? maxW() : 'max-w-8xl'} px-2 sm:px-3`}
+              class={`mx-auto h-full min-h-full ${isChat() ? maxW() : 'max-w-8xl'}`}
               classList={{
                 'content-background': !isChat(),
               }}
@@ -203,7 +204,7 @@ const Layout: Component<{ children?: any }> = (props) => {
           </main>
         </div>
       </div>
-      <Toasts />
+      <Notifications />
       <ImpersonateModal
         show={cfg.showImpersonate}
         close={() => settingStore.toggleImpersonate(false)}
@@ -212,11 +213,14 @@ const Layout: Component<{ children?: any }> = (props) => {
       <ProfileModal />
       <For each={rootModals.modals}>{(modal) => modal.element}</For>
       <ImageModal />
-
+      <Show when={cfg.showImgSettings}>
+        <ImageSettingsModal />
+      </Show>
+      <SettingsModal />
       <div
-        class="absolute bottom-0 left-0 right-0 top-0 z-10 h-[100vh] w-full bg-black bg-opacity-5"
-        classList={{ hidden: !cfg.overlay }}
-        onClick={() => settingStore.toggleOverlay(false)}
+        class="absolute bottom-0 left-0 right-0 top-0 z-10 h-[100vh] w-full bg-black bg-opacity-20 sm:hidden"
+        classList={{ hidden: !cfg.showMenu }}
+        onClick={() => settingStore.closeMenu()}
       ></div>
     </ContextProvider>
   )

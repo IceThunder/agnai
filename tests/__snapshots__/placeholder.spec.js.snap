@@ -8,5 +8,20 @@ Object {
   "parsed": "OtherBot replies a lot
 
 MainChar's personality: MainCharacter talks a lot",
+  "sections": Object {
+    "done": true,
+    "flags": Object {},
+    "sections": Object {
+      "history": Array [],
+      "post": Array [],
+      "system": Array [
+        "OtherBot replies a lot",
+        "
+
+",
+        "MainChar's personality: MainCharacter talks a lot",
+      ],
+    },
+  },
 }
 `;

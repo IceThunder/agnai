@@ -1,15 +1,25 @@
 import type { GenerateRequestV2 } from '../srv/adapter/type'
 import type { AppSchema, TokenCounter } from './types'
-import { AIAdapter, NOVEL_MODELS, OPENAI_CONTEXTS, THIRDPARTY_HANDLERS } from './adapters'
+import {
+  AIAdapter,
+  GOOGLE_LIMITS,
+  NOVEL_MODELS,
+  OPENAI_CONTEXTS,
+  THIRDPARTY_HANDLERS,
+} from './adapters'
 import { formatCharacter } from './characters'
 import { defaultTemplate } from './mode-templates'
 import { buildMemoryPrompt } from './memory'
 import { defaultPresets, getFallbackPreset, isDefaultPreset } from './presets'
 import { parseTemplate } from './template-parser'
-import { getMessageAuthor, getBotName, trimSentence } from './util'
+import { getMessageAuthor, getBotName, trimSentence, neat } from './util'
 import { Memory } from './types'
-import { promptOrderToTemplate } from './prompt-order'
+import { promptOrderToTemplate, SIMPLE_ORDER } from './prompt-order'
 import { ModelFormat, replaceTags } from './presets/templates'
+
+export type TickHandler<T = any> = (response: string, state: InferenceState, json?: T) => void
+
+export type InferenceState = 'partial' | 'done' | 'error' | 'warning'
 
 export const SAMPLE_CHAT_MARKER = `System: New conversation started. Previous conversations are examples only.`
 export const SAMPLE_CHAT_PREAMBLE = `How {{char}} speaks:`
@@ -71,6 +81,7 @@ export type PromptOpts = {
   userEmbeds: Memory.UserEmbed[]
   resolvedScenario: string
   modelFormat?: ModelFormat
+  jsonValues: Record<string, any> | undefined
 }
 
 export type BuildPromptOpts = {
@@ -89,8 +100,8 @@ export type BuildPromptOpts = {
 }
 
 /** {{user}}, <user>, {{char}}, <bot>, case insensitive */
-export const BOT_REPLACE = /(\{\{char\}\}|<BOT>|\{\{name\}\})/gi
-export const SELF_REPLACE = /(\{\{user\}\}|<USER>)/gi
+export const BOT_REPLACE = /(\{\{char\}\}|\{\{name\}\})/gi
+export const SELF_REPLACE = /(\{\{user\}\})/gi
 export const START_REPLACE = /(<START>)/gi
 
 const HOLDER_NAMES = {
@@ -129,6 +140,66 @@ export const HOLDERS = {
   userEmbed: /{{user_embed}}/gi,
 }
 
+const defaultFieldPrompt = neat`
+{{prop}}:
+{{value}}
+`
+export function buildModPrompt(opts: {
+  prompt: string
+  fields: string
+  char: Partial<AppSchema.Character>
+}) {
+  const aliases: { [key in keyof AppSchema.Character]?: string } = {
+    sampleChat: 'Example Dialogue',
+    postHistoryInstructions: 'Character Jailbreak',
+    systemPrompt: 'Character Instructions',
+  }
+
+  const props: Array<keyof AppSchema.Character> = [
+    'name',
+    'description',
+    'appearance',
+    'scenario',
+    'greeting',
+    'sampleChat',
+    'systemPrompt',
+    'postHistoryInstructions',
+  ]
+
+  const inject = (prop: string, value: string) =>
+    (opts.fields || defaultFieldPrompt)
+      .replace(/{{prop}}/gi, prop)
+      .replace(/{{value}}/gi, value)
+      .replace(/\n\n+/g, '\n')
+
+  const fields = props
+    .filter((f) => {
+      const value = opts.char[f]
+      if (typeof value !== 'string') return false
+      return !!value.trim()
+    })
+    .map((f) => {
+      const value = opts.char[f]
+      if (typeof value !== 'string') return ''
+
+      const prop = titlize(aliases[f] || f)
+      return inject(prop, value)
+    })
+
+  for (const [attr, values] of Object.entries(opts.char.persona?.attributes || {})) {
+    const value = values.join(', ')
+    if (!value.trim()) continue
+
+    fields.push(inject(`Attribute '${titlize(attr)}'`, value))
+  }
+
+  return opts.prompt.replace(/{{fields}}/gi, fields.join('\n\n'))
+}
+
+function titlize(str: string) {
+  return `${str[0].toUpperCase()}${str.slice(1).toLowerCase()}`
+}
+
 /**
  * This is only ever invoked client-side
  * @param opts
@@ -159,8 +230,13 @@ export async function createPromptParts(opts: PromptOpts, encoder: TokenCounter)
   /**
    * The lines from `getLinesForPrompt` are returned in time-descending order
    */
-  const template = getTemplate(opts)
+  let template = getTemplate(opts)
   const templateSize = await encoder(template)
+
+  if (opts.modelFormat) {
+    template = replaceTags(template, opts.modelFormat)
+  }
+
   /**
    * It's important for us to pass in a max context that is _realistic-ish_ as the embeddings
    * are retrieved based on the number of history messages we return here.
@@ -169,7 +245,7 @@ export async function createPromptParts(opts: PromptOpts, encoder: TokenCounter)
    * The queryable embeddings are messages that are _NOT_ included in the context
    */
   const maxContext = opts.settings
-    ? opts.settings.maxContextLength! - templateSize - opts.settings.maxTokens!
+    ? getContextLimit(opts.user, opts.settings) - templateSize - opts.settings.maxTokens!
     : undefined
   const lines = await getLinesForPrompt(opts, encoder, maxContext)
   const parts = await buildPromptParts(opts, lines, encoder)
@@ -181,10 +257,13 @@ export async function createPromptParts(opts: PromptOpts, encoder: TokenCounter)
     lastMessage: opts.lastMessage,
     characters: opts.characters,
     encoder,
+    jsonValues: opts.jsonValues,
   })
 
   return { lines: lines.reverse(), parts, template: prompt }
 }
+
+export type AssembledPrompt = Awaited<ReturnType<typeof assemblePrompt>>
 
 /**
  * This is only ever invoked server-side
@@ -204,45 +283,49 @@ export async function assemblePrompt(
   const template = getTemplate(opts)
 
   const history = { lines, order: 'asc' } as const
-  let { parsed, inserts, length } = await injectPlaceholders(template, {
+  let { parsed, inserts, length, sections, linesAddedCount } = await injectPlaceholders(template, {
     opts,
     parts,
     history,
     characters: opts.characters,
     lastMessage: opts.lastMessage,
     encoder,
+    jsonValues: opts.jsonValues,
   })
 
-  if (opts.settings?.modelFormat) {
-    parsed = replaceTags(parsed, opts.settings.modelFormat)
+  return {
+    lines: history.lines,
+    prompt: parsed,
+    inserts,
+    parts,
+    post,
+    length,
+    sections,
+    linesAddedCount,
   }
-
-  return { lines: history.lines, prompt: parsed, inserts, parts, post, length }
 }
 
 export function getTemplate(opts: Pick<GenerateRequestV2, 'settings' | 'chat'>) {
   const fallback = getFallbackPreset(opts.settings?.service!)
-  if (
-    opts.settings?.useAdvancedPrompt === 'basic' &&
-    opts.settings.promptOrderFormat &&
-    opts.settings.promptOrder
-  ) {
-    const template = promptOrderToTemplate(
-      opts.settings.promptOrderFormat,
-      opts.settings.promptOrder
-    )
-    return template
-    // return ensureValidTemplate(template)
+  if (opts.settings?.useAdvancedPrompt === 'basic' || opts.settings?.presetMode === 'simple') {
+    if (opts.settings.presetMode === 'simple') {
+      const template = promptOrderToTemplate('Universal', SIMPLE_ORDER)
+      return template
+    }
+
+    if (opts.settings.modelFormat && opts.settings.promptOrder) {
+      const template = promptOrderToTemplate(opts.settings.modelFormat, opts.settings.promptOrder)
+      return template
+    }
   }
 
   const template = opts.settings?.gaslight || fallback?.gaslight || defaultTemplate
 
-  const validate = opts.settings?.useAdvancedPrompt !== 'no-validation'
-
-  if (!validate) {
+  if (opts.settings?.useAdvancedPrompt === 'no-validation') {
     return template
   }
 
+  // Deprecated
   return ensureValidTemplate(template)
 }
 
@@ -251,12 +334,15 @@ type InjectOpts = {
   parts: PromptParts
   lastMessage?: string
   characters: Record<string, AppSchema.Character>
+  jsonValues: Record<string, any> | undefined
   history?: { lines: string[]; order: 'asc' | 'desc' }
   encoder: TokenCounter
 }
 
 export async function injectPlaceholders(template: string, inject: InjectOpts) {
   const { opts, parts, history: hist, encoder, ...rest } = inject
+
+  template = replaceTags(template, opts.settings?.modelFormat || 'Alpaca')
 
   // Basic templates can exclude example dialogue
   const validate =
@@ -283,8 +369,6 @@ export async function injectPlaceholders(template: string, inject: InjectOpts) {
     hist.lines = next
   }
 
-  const { adapter, model } = getAdapter(opts.chat, opts.user, opts.settings)
-
   const lines = !hist
     ? []
     : hist.order === 'desc'
@@ -299,7 +383,7 @@ export async function injectPlaceholders(template: string, inject: InjectOpts) {
     lines,
     ...rest,
     limit: {
-      context: getContextLimit(opts.settings, adapter, model),
+      context: getContextLimit(opts.user, opts.settings),
       encoder,
     },
   })
@@ -540,8 +624,7 @@ export async function getLinesForPrompt(
   encoder: TokenCounter,
   maxContext?: number
 ) {
-  const { adapter, model } = getAdapter(opts.chat, opts.user, settings)
-  maxContext = maxContext || getContextLimit(settings, adapter, model)
+  maxContext = maxContext || getContextLimit(opts.user, settings)
 
   const profiles = new Map<string, AppSchema.Profile>()
   for (const member of members) {
@@ -669,7 +752,8 @@ function fillPlaceholders(opts: {
   user: string
 }): string {
   const prefix = opts.msg.system ? 'System' : opts.author
-  const msg = opts.msg.msg.replace(BOT_REPLACE, opts.char).replace(SELF_REPLACE, opts.user)
+  const text = opts.msg.json?.history || opts.msg.msg
+  const msg = text.replace(BOT_REPLACE, opts.char).replace(SELF_REPLACE, opts.user)
 
   return `${prefix}: ${msg}`
 }
@@ -737,16 +821,16 @@ export function getChatPreset(
  */
 export function getAdapter(
   chat: AppSchema.Chat,
-  config: AppSchema.User,
+  user: AppSchema.User,
   preset: Partial<AppSchema.GenSettings> | undefined
 ) {
   let adapter = preset?.service!
 
-  const thirdPartyFormat = preset?.thirdPartyFormat || config.thirdPartyFormat
+  const thirdPartyFormat = preset?.thirdPartyFormat || user.thirdPartyFormat
   const isThirdParty = thirdPartyFormat in THIRDPARTY_HANDLERS && adapter === 'kobold'
 
   if (adapter === 'kobold') {
-    adapter = THIRDPARTY_HANDLERS[config.thirdPartyFormat]
+    adapter = THIRDPARTY_HANDLERS[user.thirdPartyFormat]
   }
 
   let model = ''
@@ -757,7 +841,7 @@ export function getAdapter(
   }
 
   if (adapter === 'novel') {
-    model = config.novelModel
+    model = user.novelModel
   }
 
   if (adapter === 'openai') {
@@ -770,16 +854,26 @@ export function getAdapter(
     } else presetName = 'User Preset'
   } else if (chat.genSettings) {
     presetName = 'Chat Settings'
-  } else if (config.defaultPresets) {
-    const servicePreset = config.defaultPresets[adapter]
+  } else if (user.defaultPresets) {
+    const servicePreset = user.defaultPresets[adapter]
     if (servicePreset) {
       presetName = `Service Preset`
     }
   }
 
-  const contextLimit = getContextLimit(preset, adapter, model)
+  const contextLimit = getContextLimit(user, preset)
 
   return { adapter, model, preset: presetName, contextLimit, isThirdParty }
+}
+
+type LimitStrategy = (
+  user: AppSchema.User,
+  gen: Partial<AppSchema.GenSettings> | undefined
+) => { context: number; tokens: number } | void
+
+let _strategy: LimitStrategy = () => {}
+export function setContextLimitStrategy(strategy: LimitStrategy) {
+  _strategy = strategy
 }
 
 /**
@@ -787,29 +881,47 @@ export function getAdapter(
  */
 
 export function getContextLimit(
-  gen: Partial<AppSchema.GenSettings> | undefined,
-  adapter: AIAdapter,
-  model: string
+  user: AppSchema.User,
+  gen: Partial<AppSchema.GenSettings> | undefined
 ): number {
+  const genAmount = gen?.maxTokens || getFallbackPreset(gen?.service || 'horde')?.maxTokens || 80
   const configuredMax =
-    gen?.maxContextLength || getFallbackPreset(adapter)?.maxContextLength || 2048
+    gen?.maxContextLength || getFallbackPreset(gen?.service || 'horde')?.maxContextLength || 4096
 
-  const genAmount = gen?.maxTokens || getFallbackPreset(adapter)?.maxTokens || 80
+  if (!gen?.service) return configuredMax - genAmount
 
-  if (gen?.service === 'kobold' || gen?.service === 'ooba') return configuredMax - genAmount
+  switch (gen.service) {
+    case 'agnaistic': {
+      const stratMax = _strategy(user, gen)
+      if (gen?.useMaxContext && stratMax) {
+        return stratMax.context - genAmount
+      }
 
-  switch (adapter) {
-    case 'agnaistic':
-      return configuredMax - genAmount
+      const max = Math.min(configuredMax, stratMax?.context ?? configuredMax)
+      return max - genAmount
+    }
 
     // Any LLM could be used here so don't max any assumptions
-    case 'petals':
-    case 'kobold':
-    case 'horde':
     case 'ooba':
+    case 'petals':
+    case 'horde':
       return configuredMax - genAmount
 
+    case 'kobold': {
+      if (!gen.useMaxContext) return configuredMax - genAmount
+      switch (gen.thirdPartyFormat) {
+        case 'gemini': {
+          const max = GOOGLE_LIMITS[gen.googleModel!]
+          return max ? max - genAmount : configuredMax - genAmount
+        }
+
+        default:
+          return configuredMax - genAmount
+      }
+    }
+
     case 'novel': {
+      const model = gen?.novelModel || NOVEL_MODELS.kayra_v1
       if (model === NOVEL_MODELS.clio_v1 || model === NOVEL_MODELS.kayra_v1) {
         return Math.min(8000, configuredMax) - genAmount
       }
@@ -818,7 +930,8 @@ export function getContextLimit(
     }
 
     case 'openai': {
-      const limit = OPENAI_CONTEXTS[model] || 8100
+      const model = (gen?.service === 'openai' ? gen?.oaiModel! : gen?.thirdPartyModel) || ''
+      const limit = OPENAI_CONTEXTS[model] || 128000
       return Math.min(configuredMax, limit) - genAmount
     }
 
@@ -836,6 +949,8 @@ export function getContextLimit(
 
     case 'openrouter':
       if (gen?.openRouterModel) {
+        if (gen.useMaxContext) return gen.openRouterModel.context_length - genAmount
+
         return Math.min(gen.openRouterModel.context_length, configuredMax) - genAmount
       }
 
@@ -843,6 +958,9 @@ export function getContextLimit(
 
     case 'mancer':
       return Math.min(configuredMax, 8000) - genAmount
+
+    case 'venus':
+      return Math.min(configuredMax, 7800) - genAmount
   }
 }
 
@@ -908,4 +1026,199 @@ export function resolveScenario(
   }
 
   return result.trim()
+}
+
+export type JsonType = { title?: string; description?: string; valid?: string } & (
+  | { type: 'string'; maxLength?: number }
+  | { type: 'integer' }
+  | { type: 'enum'; enum: string[] }
+  | { type: 'bool' }
+)
+
+export type JsonSchema = {
+  title: string
+  type: 'object'
+  properties: Record<string, JsonType>
+  required: string[]
+}
+
+export interface JsonField {
+  name: string
+  disabled: boolean
+  type: JsonType
+}
+
+export const schema = {
+  str: (o?: { desc?: string; title?: string; maxLength?: number }) => ({
+    type: 'string',
+    title: o?.title,
+    maxLength: o?.maxLength ? +o.maxLength : undefined,
+  }),
+  int: (o?: { title?: string; desc?: string }) => ({
+    type: 'integer',
+    title: o?.title,
+    description: o?.desc,
+  }),
+  enum: (o: { values: string[]; title?: string; desc?: string }) => ({
+    type: 'enum',
+    enum: o.values,
+    title: o.title,
+    description: o.desc,
+  }),
+  bool: (o?: { title?: string; desc?: string }) => ({
+    type: 'bool',
+    enum: ['true', 'false', 'yes', 'no'],
+    title: o?.title,
+    description: o?.desc,
+  }),
+} satisfies Record<string, (...args: any[]) => JsonType>
+
+export function toJsonSchema(body: JsonField[]): JsonSchema | undefined {
+  if (!Array.isArray(body) || !body.length) return
+  if (body.every((field) => field.disabled)) return
+
+  const sch: JsonSchema = {
+    title: 'Response',
+    type: 'object',
+    properties: {},
+    required: [],
+  }
+
+  const props: JsonSchema['properties'] = {}
+
+  if (!!body && !Array.isArray(body)) {
+    body = Object.entries(body).map(([key, value]) => ({
+      name: key,
+      disabled: false,
+      type: value,
+    })) as any
+  }
+
+  let added = 0
+  for (const { name, disabled, type } of body) {
+    if (disabled) continue
+
+    added++
+    props[name] = { ...type }
+    switch (type.type) {
+      case 'string': {
+        props[name] = schema.str(type)
+        break
+      }
+
+      case 'bool': {
+        props[name] = schema.bool(type)
+        props[name].type = 'enum' as any
+        break
+      }
+
+      case 'enum': {
+        props[name] = {
+          type: 'enum',
+          enum: type.enum,
+        }
+        break
+      }
+
+      case 'integer': {
+        props[name] = schema.int(type)
+        break
+      }
+    }
+
+    delete props[name].valid
+
+    if (type.type === 'bool') {
+      props[name].type = 'enum'
+
+      // @ts-ignore
+      props[name].enum = ['true', 'false', 'yes', 'no']
+    }
+    sch.required.push(name)
+  }
+
+  sch.properties = props
+
+  if (added === 0) return
+  return sch
+}
+
+export function fromJsonResponse(schema: JsonField[], response: any, output: any = {}): any {
+  const json: Record<string, any> = tryJsonParseResponse(response)
+
+  for (let [key, value] of Object.entries(json)) {
+    const underscored = key.replace(/ /g, '_')
+
+    if (underscored in schema) {
+      key = underscored
+    }
+
+    const def = schema.find((s) => s.name === key)
+    if (!def) continue
+
+    output[key] = value
+    if (def.type.type === 'bool') {
+      output[key] = value.trim() === 'true' || value.trim() === 'yes'
+    }
+  }
+
+  return output
+}
+
+export function tryJsonParseResponse(res: string) {
+  if (typeof res === 'object') return res
+  try {
+    const json = JSON.parse(res)
+    return json
+  } catch (ex) {}
+
+  try {
+    const json = JSON.parse(res + '}')
+    return json
+  } catch (ex) {}
+
+  try {
+    if (res.trim().endsWith(',')) {
+      const json = JSON.parse(res.slice(0, -1))
+      return json
+    }
+  } catch (ex) {}
+
+  return {}
+}
+
+export function onJsonTickHandler(
+  schema: JsonField[],
+  handler: (res: any, state: InferenceState) => void
+) {
+  let curr: any = {}
+  const parser: TickHandler = (res, state) => {
+    if (state === 'done') {
+      const body = fromJsonResponse(schema, tryJsonParseResponse(res))
+      if (Object.keys(body).length === 0) {
+        handler(curr, state)
+        return
+      }
+
+      handler(body, state)
+      return
+    }
+
+    if (state === 'partial') {
+      const body = fromJsonResponse(schema, tryJsonParseResponse(res))
+      const keys = Object.keys(body).length
+      if (keys === 0) return
+
+      const changed = Object.keys(curr).length !== keys
+      if (!changed) return
+
+      Object.assign(curr, body)
+      handler(curr, state)
+      return
+    }
+
+    handler(curr, state)
+  }
+
+  return parser
 }

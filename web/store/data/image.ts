@@ -1,18 +1,20 @@
 import * as horde from '../../../common/horde-gen'
 import { createImagePrompt, getMaxImageContext } from '../../../common/image-prompt'
-import { api, isLoggedIn } from '../api'
+import { api } from '../api'
 import { getStore } from '../create'
-import { PromptEntities, getPromptEntities, msgsApi } from './messages'
+import { msgsApi } from './messages'
 import { AIAdapter } from '/common/adapters'
 import { decode, encode, getEncoder } from '/common/tokenize'
 import { parseTemplate } from '/common/template-parser'
-import { neat } from '/common/util'
+import { neat, wait } from '/common/util'
 import { AppSchema } from '/common/types'
 import { localApi } from './storage'
 import { subscribe } from '../socket'
 import { getAssetUrl } from '/web/shared/util'
 import { v4 } from 'uuid'
 import { md5 } from './md5'
+import { getPromptEntities, PromptEntities } from './common'
+import { genApi } from './inference'
 
 type GenerateOpts = {
   chatId?: string
@@ -21,6 +23,7 @@ type GenerateOpts = {
   prompt?: string
   append?: boolean
   source: string
+  parent?: string
 
   /** If true, the Image Settings prefix and suffix won't be applied */
   noAffix?: boolean
@@ -46,7 +49,15 @@ export const imageApi = {
 
 export async function generateImage({ chatId, messageId, onDone, ...opts }: GenerateOpts) {
   const entities = await getPromptEntities()
-  const prompt = opts.prompt ? opts.prompt : await createSummarizedImagePrompt(entities)
+  const summary = opts.prompt
+    ? await localApi.result({ response: opts.prompt })
+    : await createSummarizedImagePrompt(entities)
+
+  if (!summary.result) {
+    return summary
+  }
+
+  const prompt = summary.result.response
 
   const characterId = entities.messages.reduceRight((id, msg) => id || msg.characterId)
 
@@ -64,27 +75,33 @@ export async function generateImage({ chatId, messageId, onDone, ...opts }: Gene
     source: opts.source,
     chatId,
     characterId,
+    parent: opts.parent,
   })
   return res
 }
 
-export async function generateImageWithPrompt(
-  prompt: string,
-  source: string,
+export async function generateImageWithPrompt(opts: {
+  prompt: string
+  source: string
   onDone: (result: { image: string; file: File; data?: string }) => void
-) {
+  onTick?: (status: horde.HordeCheck) => void
+}) {
+  const { prompt, source, onDone } = opts
   const user = getStore('user').getState().user
 
   if (!user) {
     throw new Error('Could not get user settings')
   }
 
-  if (!isLoggedIn() && (!user.images || user.images.type === 'horde')) {
+  if (!user.images || user.images.type === 'horde') {
     try {
       const { text: image } = await horde.generateImage(
         user,
         prompt,
-        user.images?.negative || horde.defaults.image.negative
+        user.images?.negative || horde.defaults.image.negative,
+        (status) => {
+          opts.onTick?.(status)
+        }
       )
 
       const file = await dataURLtoFile(image)
@@ -97,7 +114,7 @@ export async function generateImageWithPrompt(
     }
   }
 
-  const res = await api.post<{ success: boolean }>(`/character/image`, {
+  const res = await api.post<{ success: boolean; requestId: string }>(`/character/image`, {
     prompt,
     user,
     ephemeral: true,
@@ -107,11 +124,17 @@ export async function generateImageWithPrompt(
   return res
 }
 
-type ImageResult = { image: string; file: File; data?: string; error?: string }
+export type ImageResult = { image: string; file: File; data?: string; error?: string }
 
 export async function generateImageAsync(
   prompt: string,
-  opts: { noAffix?: boolean } = {}
+  opts: {
+    model?: string
+    requestId?: string
+    noAffix?: boolean
+    onTick?: (status: horde.HordeCheck) => void
+    onDone?: (result: { image: string; file: File; data?: string; error?: string }) => void
+  } = {}
 ): Promise<ImageResult> {
   const user = getStore('user').getState().user
   const source = `image-${v4()}`
@@ -120,16 +143,21 @@ export async function generateImageAsync(
     throw new Error('Could not get user settings')
   }
 
-  if (!isLoggedIn() && (!user.images || user.images.type === 'horde')) {
+  if (!user.images || user.images.type === 'horde') {
     try {
       const { text: image } = await horde.generateImage(
         user,
         prompt,
-        user.images?.negative || horde.defaults.image.negative
+        user.images?.negative || '',
+        (status) => {
+          opts.onTick?.(status)
+        }
       )
 
       const file = await dataURLtoFile(image)
       const data = await getImageData(file)
+
+      opts.onDone?.({ image, file, data })
 
       return { image, file, data }
     } catch (ex: any) {
@@ -137,10 +165,11 @@ export async function generateImageAsync(
     }
   }
 
-  const requestId = v4()
+  const requestId = opts.requestId || v4()
 
   const promise = new Promise<ImageResult>((resolve, reject) => {
     callbacks.set(requestId, (image) => {
+      opts.onDone?.(image)
       if (image.error) return reject(new Error(image.error))
       resolve(image)
     })
@@ -152,6 +181,7 @@ export async function generateImageAsync(
     ephemeral: true,
     source,
     noAffix: opts.noAffix,
+    model: opts.model,
     requestId,
   })
 
@@ -171,17 +201,40 @@ subscribe(
 
     callbacks.delete(body.requestId)
     const url = getAssetUrl(body.image)
-    const image = await fetch(getAssetUrl(body.image)).then((res) => res.blob())
-    const file = new File([image], `${body.source}.png`, { type: 'image/png' })
 
-    const hash = md5(await image.text())
-    Object.assign(file, { hash })
+    try {
+      const image = await tryFetchImage(getAssetUrl(body.image))
+      const file = new File([image], `${body.source}.png`, { type: 'image/png' })
 
-    const data = await getImageData(file)
+      const hash = md5(await image.text())
+      Object.assign(file, { hash })
 
-    callback({ image: url, file, data })
+      const data = await getImageData(file)
+
+      callback({ image: url, file, data })
+    } catch (ex) {
+      callback({ error: 'Failed to download image', image: '', file: null as any })
+    }
   }
 )
+
+async function tryFetchImage(image: string, attempt = 1) {
+  if (attempt > 10) throw new Error(`failed to download image`)
+
+  try {
+    const res = await fetch(getAssetUrl(image), {
+      cache: 'no-cache',
+    })
+    if (res.status && res.status > 200) {
+      await wait(3)
+      return tryFetchImage(image, attempt + 1)
+    }
+
+    return res.blob()
+  } catch (ex) {
+    return tryFetchImage(image, attempt + 1)
+  }
+}
 
 subscribe('image-failed', { requestId: 'string', error: 'string' }, (body) => {
   const callback = callbacks.get(body.requestId)
@@ -210,16 +263,16 @@ async function createSummarizedImagePrompt(opts: PromptEntities) {
   if (canUseService && opts.user.images?.summariseChat) {
     console.log('Using', opts.settings?.service, 'to summarise')
 
-    const summary = await getChatSummary(opts.settings)
+    const summary = await getChatSummary(opts.settings, opts.user.images?.summaryPrompt)
     console.log('Image caption: ', summary)
     return summary
   }
 
   const prompt = await createImagePrompt(opts)
-  return prompt
+  return localApi.result({ response: prompt, meta: {} })
 }
 
-async function getChatSummary(settings: Partial<AppSchema.GenSettings>) {
+async function getChatSummary(settings: Partial<AppSchema.GenSettings>, summaryPrompt?: string) {
   const opts = await msgsApi.getActiveTemplateParts()
   opts.limit = {
     context: 1024,
@@ -227,51 +280,60 @@ async function getChatSummary(settings: Partial<AppSchema.GenSettings>) {
   }
   opts.lines = (opts.lines || []).reverse()
 
-  const template = getSummaryTemplate(settings.service!)
+  let template = getSummaryTemplate(settings.service!, summaryPrompt)
+
   if (!template) throw new Error(`No chat summary template available for "${settings.service!}"`)
 
   const parsed = await parseTemplate(template, opts)
   const prompt = parsed.parsed
-  const values = await msgsApi.guidance<{ summary: string }>({
+  const response = await genApi.basicInference({
     prompt,
     settings,
-    service: settings.service,
   })
-  return values.summary
+
+  return response
 }
 
-function getSummaryTemplate(service: AIAdapter) {
+function getSummaryTemplate(service: AIAdapter, summaryPrompt?: string) {
   switch (service) {
-    case 'novel':
+    case 'novel': {
+      const prompt =
+        summaryPrompt ||
+        `Write a detailed image caption of the current scene with a description of each character's appearance`
       return neat`
       {{char}}'s personality: {{personality}}
       [ Style: chat ]
       ***
       {{history}}
-      { Write a detailed image caption of the current scene with a description of each character's appearance }
-      [summary | tokens=250]
-      `
+      { ${prompt} }`
+    }
 
     case 'openai':
     case 'openrouter':
     case 'claude':
-    case 'scale':
+    case 'scale': {
+      const prompt =
+        summaryPrompt ||
+        `Write an image caption of the current scene including the character's appearance`
       return neat`
-              {{personality}}
-              
-              (System note: Start of conversation)
-              {{history}}
-              
-              {{ujb}}
-              (System: Write an image caption of the current scene including the character's appearance)
-              Image caption: [summary]
-              `
+      {{personality}}
+      
+      (System note: Start of conversation)
+      {{history}}
+      
+      {{ujb}}
+      (System: ${prompt})
+      Image caption:`
+    }
 
     case 'ooba':
     case 'kobold':
-    case 'agnaistic':
+    case 'agnaistic': {
+      const prompt =
+        summaryPrompt ||
+        `Write an image caption of the current scene using physical descriptions without names.`
       return neat`
-      Below is an instruction that describes a task. Write a response that completes the request.
+      <system>Below is an instruction that describes a task. Write a response that completes the request.</system>
 
       {{char}}'s Persona: {{personality}}
 
@@ -279,15 +341,13 @@ function getSummaryTemplate(service: AIAdapter) {
 
       Then the roleplay chat begins.
   
-      {{#each msg}}{{#if .isbot}}### Response:\n{{.name}}: {{.msg}}{{/if}}{{#if .isuser}}### Instruction:\n{{.name}}: {{.msg}}{{/if}}
+      {{#each msg}}{{#if .isbot}}<bot>{{.name}}: {{.msg}}</bot>{{/if}}{{#if .isuser}}<user>{{.name}}: {{.msg}}</user>{{/if}}
       {{/each}}
 
-      ### Instruction:
-      Write an image caption of the current scene using physical descriptions without names.
+      <user>${prompt}</user>
 
-      ### Response:
-      Image caption: [summary | tokens=250]
-      `
+      <bot>Image caption:`
+    }
   }
 }
 
@@ -300,6 +360,12 @@ export async function dataURLtoFile(base64: string, name?: string): Promise<File
     })
 }
 
+/**
+ * Returns image base64
+ * @param file
+ * @param name
+ * @returns
+ */
 export async function getImageData(file: File | Blob | string | undefined, name?: string) {
   if (!file) return
 

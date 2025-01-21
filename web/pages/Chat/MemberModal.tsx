@@ -7,7 +7,6 @@ import { ConfirmModal } from '../../shared/Modal'
 import { characterStore, chatStore, toastStore, userStore } from '../../store'
 import TextInput from '../../shared/TextInput'
 import { v4 } from 'uuid'
-import { getStrictForm } from '../../shared/util'
 import { isLoggedIn } from '/web/store/api'
 import CharacterSelectList from '/web/shared/CharacterSelectList'
 import { getActiveBots } from './util'
@@ -117,16 +116,28 @@ const ParticipantsList: Component<{
   edit: (charId: string) => void
 }> = (props) => {
   const self = userStore()
-  const chars = characterStore((s) => s.characters)
+  const chars = characterStore()
   const state = chatStore()
 
   const [deleting, setDeleting] = createSignal<AppSchema.Profile>()
 
-  const charMembers = createMemo<AppSchema.Character[]>(() =>
-    getActiveBots(state.active?.chat!, chars.map, state.active?.chat.tempCharacters || {}).sort(
-      (left, right) => left.name.localeCompare(right.name)
+  const charMembers = createMemo<AppSchema.Character[]>(() => {
+    const active = getActiveBots(
+      state.active?.chat!,
+      chars.characters.map,
+      state.active?.chat.tempCharacters || {}
     )
-  )
+
+    const needsImpersonate =
+      chars.impersonating && active.every((a) => a._id !== chars.impersonating?._id)
+    if (needsImpersonate) {
+      active.unshift(chars.impersonating!)
+    }
+
+    active.sort((left, right) => left.name.localeCompare(right.name))
+
+    return active
+  })
 
   const temps = createMemo(() => {
     const chat = state.active?.chat
@@ -306,15 +317,17 @@ const InviteUser: Component<{ setView: (view: View) => {} }> = (props) => {
   let ref: any
   const state = chatStore()
 
+  const [userId, setUserId] = createSignal('')
+
   const invite = () => {
     if (!state.active?.chat) return
     const chatId = state.active.chat._id
-    const body = getStrictForm(ref, { userId: 'string' })
-    if (!body.userId) {
+
+    if (!userId()) {
       toastStore.warn('No user ID provided')
       return
     }
-    return chatStore.inviteUser(chatId, body.userId, () => props.setView('list'))
+    return chatStore.inviteUser(chatId, userId(), () => props.setView('list'))
   }
 
   return (
@@ -322,10 +335,10 @@ const InviteUser: Component<{ setView: (view: View) => {} }> = (props) => {
       <form ref={ref} class="flex w-full max-w-full flex-col gap-2">
         <TextInput
           class="text-sm"
-          fieldName="userId"
           label="Invite User"
           helperText="The ID of the user to invite. The user should provide this to you"
           placeholder={`E.g. ${v4()}`}
+          onChange={(ev) => setUserId(ev.currentTarget.value)}
         />
 
         <div class="mt-4">

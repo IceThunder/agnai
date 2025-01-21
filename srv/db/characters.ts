@@ -2,6 +2,7 @@ import { v4 } from 'uuid'
 import { db } from './client'
 import { AppSchema } from '../../common/types/schema'
 import { now } from './util'
+import { UpdateFilter } from 'mongodb'
 
 export type CharacterUpdate = Partial<
   Pick<
@@ -30,6 +31,8 @@ export type CharacterUpdate = Partial<
     | 'visualType'
     | 'voiceDisabled'
     | 'imageSettings'
+    | 'json'
+    | 'folder'
   >
 >
 
@@ -61,6 +64,7 @@ export async function createCharacter(
     | 'visualType'
     | 'voiceDisabled'
     | 'imageSettings'
+    | 'json'
   >
 ) {
   const newChar: AppSchema.Character = {
@@ -81,6 +85,40 @@ export async function updateCharacter(id: string, userId: string, char: Characte
   if (edit.avatar === undefined) {
     delete edit.avatar
   }
+  await db('character').updateOne({ _id: id, userId }, { $set: edit })
+  return getCharacter(userId, id)
+}
+
+export async function bulkUpdate(
+  userId: string,
+  charIds: string[],
+  update: { folder?: string; addTag?: string; removeTag?: string }
+) {
+  const set: UpdateFilter<AppSchema.Character> = {}
+
+  if (update.folder) {
+    set.folder = update.folder
+  }
+
+  if (update.addTag) {
+    set.$push = { tags: update.addTag }
+  }
+
+  if (update.removeTag) {
+    set.$pull = { tags: update.removeTag }
+  }
+
+  const result = await db('character').updateMany(
+    { where: { userId, _id: { $in: charIds } } },
+    { $set: set }
+  )
+
+  return result.matchedCount
+}
+
+export async function partialUpdateCharacter(id: string, userId: string, char: CharacterUpdate) {
+  const edit = { ...char, updatedAt: now() }
+
   await db('character').updateOne({ _id: id, userId }, { $set: edit })
   return getCharacter(userId, id)
 }
@@ -108,6 +146,7 @@ export async function getCharacters(userId: string) {
       updatedAt: 1,
       voice: 1,
       voiceDisabled: 1,
+      folder: 1,
     })
     .toArray()
 
@@ -136,6 +175,7 @@ export async function getCharacterList(charIds: string[], userId?: string) {
     visualType: 1,
     sprite: 1,
     voiceDisabled: 1,
+    folder: 1,
   }
   if (userId) {
     const list = await db('character')

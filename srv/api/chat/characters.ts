@@ -86,6 +86,7 @@ export const upsertTempCharacter = handle(async ({ body, params, userId }) => {
       visualType: 'string?',
       sprite: 'any?',
       culture: 'string?',
+      json: 'any?',
     },
     body
   )
@@ -97,8 +98,11 @@ export const upsertTempCharacter = handle(async ({ body, params, userId }) => {
   const tempCharacters = chat.tempCharacters || {}
   const prev = body._id ? tempCharacters[body._id] : null
 
+  const id =
+    body._id && tempCharacters[body._id] ? body._id : `temp-${chat.characterId}_${v4().slice(0, 8)}`
+
   const upserted: AppSchema.Character = {
-    _id: body._id || `temp-${v4().slice(0, 8)}`,
+    _id: id,
     kind: 'character',
     createdAt: now(),
     updatedAt: now(),
@@ -121,6 +125,7 @@ export const upsertTempCharacter = handle(async ({ body, params, userId }) => {
     visualType: body.visualType,
     sprite: body.sprite,
     culture: body.culture,
+    json: body.json,
   }
 
   tempCharacters[upserted._id] = upserted

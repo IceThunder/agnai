@@ -8,11 +8,12 @@ import {
   createEffect,
   createMemo,
   createSignal,
+  on,
   onMount,
 } from 'solid-js'
 import { FormLabel } from '../FormLabel'
-import { AIAdapter, PresetAISettings } from '/common/adapters'
-import { getAISettingServices, toMap } from '../util'
+import { AIAdapter } from '/common/adapters'
+import { toMap } from '../util'
 import { useEffect, useRootModal } from '../hooks'
 import Modal from '../Modal'
 import { HelpCircle } from 'lucide-solid'
@@ -24,13 +25,13 @@ import { ensureValidTemplate, buildPromptParts } from '/common/prompt'
 import { AppSchema } from '/common/types/schema'
 import { v4 } from 'uuid'
 import { isDefaultTemplate, replaceTags } from '../../../common/presets/templates'
-import Select from '../Select'
 import TextInput from '../TextInput'
 import { presetStore } from '/web/store'
-import Sortable, { SortItem } from '../Sortable'
+import Sortable from '../Sortable'
 import { SelectTemplate } from './SelectTemplate'
-import { formatHolders } from '/common/prompt-order'
 import { Toggle } from '/web/shared/Toggle'
+import { AutoEvent, PromptSuggestions, onPromptAutoComplete, onPromptKey } from './Suggestions'
+import { PresetState, SetPresetState } from '../PresetSettings/types'
 
 type Placeholder = {
   required: boolean
@@ -71,13 +72,14 @@ const v2placeholders = {
   lowpriority: { required: false, limit: Infinity, inserted: `#lowpriority}} {{/lowpriority` },
 } satisfies Record<string, Placeholder>
 
-const helpers: { [key in InterpAll]?: JSX.Element | string } = {
+const helpers: { [key in InterpAll | string]?: JSX.Element | string } = {
   char: 'Character name',
   user: `Your impersonated character's name. Your profile name if you aren't impersonating a character`,
   scenario: `Your main character's scenario`,
   personality: `The personality of the replying character`,
   example_dialogue: `The example dialogue of the replying character`,
 
+  'json.variable name': 'A value from your JSON schema. E.g. `{{json.name of my value}}`',
   system_prompt: `(For instruct models like Turbo, GPT-4, Claude, etc). "Instructions" for how the AI should behave. E.g. "Enter roleplay mode. You will write the {{char}}'s next reply ..."`,
   ujb: '(Aka: `{{jailbreak}}`) Similar to `system_prompt`, but typically at the bottom of the prompt',
 
@@ -138,13 +140,12 @@ type Optionals = { exclude: InterpAll[] } | { include: InterpAll[] } | {}
 
 const PromptEditor: Component<
   {
-    fieldName: string
     service?: AIAdapter
-    inherit?: Partial<AppSchema.GenSettings>
+    fieldName?: string
+    state?: PresetState
     disabled?: boolean
-    value?: string
-    onChange?: (value: string) => void
-    aiSetting?: keyof PresetAISettings
+    value: string
+    onChange: (update: { prompt?: string; templateId?: string }) => void
     showHelp?: boolean
     placeholder?: string
     minHeight?: number
@@ -160,11 +161,9 @@ const PromptEditor: Component<
 > = (props) => {
   let ref: HTMLTextAreaElement = null as any
 
-  const adapters = createMemo(() => getAISettingServices(props.aiSetting || 'gaslight'))
   const presets = presetStore()
-  const [input, setInput] = createSignal<string>(props.value || '')
 
-  const [templateId, setTemplateId] = createSignal('')
+  const [autoOpen, setAutoOpen] = createSignal(false)
   const [template, setTemplate] = createSignal('')
 
   const [help, showHelp] = createSignal(false)
@@ -173,16 +172,16 @@ const PromptEditor: Component<
   const [rendered, setRendered] = createSignal('')
 
   const openTemplate = () => {
-    if (!templateId()) {
-      setTemplateId(props.inherit?.promptTemplateId || '')
-    }
-
     setTemplates(true)
     setTemplate(ref.value)
   }
 
+  const onTemplateKeyDown = (ev: AutoEvent) => {
+    onPromptKey(ev, () => setAutoOpen(true))
+  }
+
   const templateName = createMemo(() => {
-    const id = templateId()
+    const id = props.state?.promptTemplateId
     if (!id) return ''
     if (isDefaultTemplate(id)) {
       return id
@@ -193,41 +192,42 @@ const PromptEditor: Component<
   })
 
   const togglePreview = async () => {
-    const opts = await getExampleOpts(props.inherit)
-    const template = props.noDummyPreview ? input() : ensureValidTemplate(input())
+    const opts = await getExampleOpts(props.state)
+    const template = props.noDummyPreview ? props.value : ensureValidTemplate(props.value)
     let { parsed } = await parseTemplate(template, opts)
 
-    if (props.inherit?.modelFormat) {
-      parsed = replaceTags(parsed, props.inherit.modelFormat)
+    if (props.state?.modelFormat) {
+      parsed = replaceTags(parsed, props.state.modelFormat)
     }
 
     setRendered(parsed)
     setPreview(!preview())
   }
 
-  // createEffect(async () => {
-  //   const opts = await getExampleOpts(props.inherit)
-  //   const template = props.noDummyPreview ? input() : ensureValidTemplate(input(), opts.parts)
-  //   let { parsed } = await parseTemplate(template, opts)
-
-  //   if (props.inherit?.modelFormat) {
-  //     parsed = replaceTags(parsed, props.inherit.modelFormat)
-  //   }
-
-  //   setRendered(parsed)
-  // })
-
   const onChange = (ev: Event & { currentTarget: HTMLTextAreaElement }) => {
-    setInput(ev.currentTarget.value)
     resize()
-    props.onChange?.(ev.currentTarget.value)
+    props.onChange?.({ prompt: ev.currentTarget.value, templateId: props.state?.promptTemplateId })
   }
 
-  createEffect(() => {
-    if (!props.value) return
-    setInput(props.value)
-    ref.value = props.value
-  })
+  /**
+   * Specifically for the .gaslight property only:
+   * If there is a `promptTemplateId` set, we need to assign the ref.value to the template prompt
+   * Otherwise use the `props.value` which is the gaslight template.
+   */
+  createEffect(
+    on(
+      () => [props.value, template(), props.state?.promptTemplateId, presets.templates],
+      () => {
+        if (props.state?.promptTemplateId) {
+          const template = presets.templates.find((t) => t._id === props.state?.promptTemplateId)
+          ref.value = template?.template || 'Loading...'
+          return
+        }
+
+        ref.value = props.value
+      }
+    )
+  )
 
   const usable = createMemo(() => {
     type Entry = [Interp, Placeholder]
@@ -256,7 +256,6 @@ const PromptEditor: Component<
     const start = ref.selectionStart
     const end = ref.selectionEnd
     ref.setRangeText(text, ref.selectionStart, ref.selectionEnd, 'select')
-    setInput(ref.value)
     setTimeout(() => ref.setSelectionRange(text.length + start, text.length + end))
     ref.focus()
   }
@@ -277,16 +276,10 @@ const PromptEditor: Component<
     ref.style.height = `${next}px`
   }
 
-  const hide = createMemo(() => {
-    if (props.hide) return 'hidden'
-    if (!props.service || !adapters()) return ''
-    return adapters()!.includes(props.service) ? '' : `hidden `
-  })
-
   onMount(resize)
 
   return (
-    <div class={`w-full flex-col gap-2 ${hide()}`}>
+    <div class={`relative w-full flex-col gap-2`} classList={{ hidden: props.hide ?? false }}>
       <Show when={props.showHelp}>
         <FormLabel
           label={
@@ -300,26 +293,25 @@ const PromptEditor: Component<
               </div>
               <div class="flex gap-2">
                 <Button size="sm" onClick={togglePreview}>
-                  Toggle Preview
+                  Preview
                 </Button>
                 <Show when={props.showTemplates}>
-                  <Show when={!props.inherit?.promptTemplateId}>
+                  <Show when={!props.state?.promptTemplateId}>
                     <Button size="sm" onClick={openTemplate}>
-                      Use Library Template
+                      Use Template
                     </Button>
                   </Show>
 
-                  <Show when={!!props.inherit?.promptTemplateId}>
+                  <Show when={!!props.state?.promptTemplateId}>
                     <Button size="sm" onClick={openTemplate}>
-                      Update Library Template
+                      Update Template
                     </Button>
                   </Show>
 
                   <Button
                     size="sm"
                     onClick={() => {
-                      setTemplateId('')
-                      ref.value = props.inherit?.gaslight || ''
+                      props.onChange?.({ templateId: '', prompt: props.state?.gaslight || '' })
                     }}
                   >
                     Use Preset's Template
@@ -343,29 +335,33 @@ const PromptEditor: Component<
       </Show>
 
       <Show when={preview()}>
-        <pre class="whitespace-pre-wrap break-words text-xs">{rendered()}</pre>
+        <pre class="whitespace-pre-wrap break-words text-sm">{rendered()}</pre>
       </Show>
 
-      <Show when={props.fieldName === 'gaslight'}>
+      <Show when={props.fieldName === 'gaslight' && !!props.state?.promptTemplateId}>
         <TextInput readonly fieldName="promptTemplateName" value={`Template: ${templateName()}`} />
-        <TextInput fieldName="promptTemplateId" value={templateId()} parentClass="hidden" />
       </Show>
 
+      <PromptSuggestions
+        onComplete={(opt) => onPromptAutoComplete(ref, opt)}
+        open={autoOpen()}
+        close={() => setAutoOpen(false)}
+        jsonValues={{ example: '', 'example with spaces': '', response: '' }}
+      />
       <textarea
-        id={props.fieldName}
-        name={props.fieldName}
-        class="form-field focusable-field text-900 min-h-[4rem] w-full rounded-xl px-4 py-2 text-sm"
+        class="form-field focusable-field text-900 min-h-[4rem] w-full rounded-xl px-4 py-2 font-mono text-sm"
         classList={{ hidden: preview() }}
         ref={ref}
         onKeyUp={onChange}
-        disabled={props.disabled || !!templateId()}
+        disabled={props.disabled || !!props.state?.promptTemplateId}
         placeholder={props.placeholder?.replace(/\n/g, '\u000A')}
+        onKeyDown={onTemplateKeyDown}
       />
 
-      <div class="flex flex-wrap gap-2" classList={{ hidden: !!templateId() }}>
+      <div class="flex flex-wrap gap-2" classList={{ hidden: !!props.state?.promptTemplateId }}>
         <For each={usable()}>
           {([name, data]) => (
-            <Placeholder name={name} {...data} input={input()} onClick={onPlaceholder} />
+            <Placeholder name={name} {...data} input={props.value} onClick={onPlaceholder} />
           )}
         </For>
       </div>
@@ -381,11 +377,11 @@ const PromptEditor: Component<
           show={templates()}
           close={() => setTemplates(false)}
           select={(id, template) => {
-            setTemplateId(id)
-            ref.value = template
+            props.onChange({ templateId: id, prompt: props.value })
           }}
-          currentTemplateId={templateId() || props.inherit?.promptTemplateId}
+          currentTemplateId={props.state?.promptTemplateId}
           currentTemplate={template()}
+          presetId={props.state?._id}
         />
       </Show>
     </div>
@@ -411,43 +407,20 @@ const SORTED_LABELS = Object.entries(BASIC_LABELS)
   .sort((l, r) => l.id - r.id)
 
 export const BasicPromptTemplate: Component<{
-  inherit?: Partial<AppSchema.GenSettings>
+  state: PresetState
+  setter: SetPresetState
   hide?: boolean
 }> = (props) => {
-  let ref: HTMLInputElement
-  const items = Object.keys(formatHolders).map((label) => ({
-    label: `Format: ${label}`,
-    value: label,
-  }))
-
-  const [mod, setMod] = createSignal(
-    props.inherit?.promptOrder?.map((o) => ({
-      ...BASIC_LABELS[o.placeholder],
-      value: o.placeholder,
-      enabled: o.enabled,
-    })) || SORTED_LABELS.map((h) => ({ ...h, enabled: true }))
-  )
-
   const isMobile = createMemo(() => /iPhone|iPad|iPod|Android/i.test(navigator.userAgent))
   const [lockPromptOrder, setLockPromptOrder] = createSignal(isMobile())
-
-  const updateRef = (items: SortItem[]) => {
-    ref.value = items.map((n) => `${n.value}=${n.enabled ? 'on' : 'off'}`).join(',')
-  }
-
-  const onClick = (id: number) => {
-    const prev = mod()
-    const next = prev.map((o) => {
-      if (o.id !== id) return o
-      return { ...o, enabled: !o.enabled }
-    })
-    setMod(next)
-    updateRef(next)
-  }
-
-  onMount(() => {
-    updateRef(mod())
-  })
+  const items = createMemo(
+    () =>
+      props.state?.promptOrder?.map((o) => ({
+        ...BASIC_LABELS[o.placeholder],
+        value: o.placeholder,
+        enabled: !!o.enabled,
+      })) || SORTED_LABELS.map((h) => ({ ...h, enabled: true }))
+  )
 
   return (
     <Card border hide={props.hide}>
@@ -458,11 +431,6 @@ export const BasicPromptTemplate: Component<{
           Enable **Advanced Prompting** for full control and customization."
         />
         <div class="flex flex-wrap gap-4">
-          <Select
-            fieldName="promptOrderFormat"
-            items={items}
-            value={props.inherit?.promptOrderFormat || 'Alpaca'}
-          />
           <Toggle
             fieldName="lockPromptOrder"
             label="Lock Prompt Order"
@@ -472,16 +440,14 @@ export const BasicPromptTemplate: Component<{
           />
         </div>
         <Sortable
-          items={mod()}
-          onChange={updateRef}
-          onItemClick={onClick}
+          items={items()}
+          onChange={(next) =>
+            props.setter(
+              'promptOrder',
+              next.map((n) => ({ placeholder: n.value as string, enabled: !!n.enabled }))
+            )
+          }
           disabled={lockPromptOrder()}
-        />
-        <TextInput
-          fieldName="promptOrder"
-          parentClass="hidden"
-          ref={(ele) => (ref = ele)}
-          // value={''}
         />
       </div>
     </Card>
@@ -567,7 +533,7 @@ const HelpModal: Component<{
   return null
 }
 
-async function getExampleOpts(inherit?: Partial<AppSchema.GenSettings>) {
+async function getExampleOpts(inherit?: PresetState) {
   const char = toChar('Rory', {
     scenario: 'Rory is strolling in the park',
     persona: toPersona('Rory is very talkative.'),
@@ -617,5 +583,6 @@ async function getExampleOpts(inherit?: Partial<AppSchema.GenSettings>) {
     chat,
     lines,
     parts,
+    jsonValues: {},
   }
 }

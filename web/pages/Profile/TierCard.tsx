@@ -3,14 +3,13 @@ import { AppSchema } from '/common/types'
 import { SolidCard } from '/web/shared/Card'
 import { markdown } from '/web/shared/markdown'
 
-type TierPreview = OmitId<
-  AppSchema.SubscriptionTier,
-  Dates | 'enabled' | 'priceId' | 'productId' | 'level'
->
+type TierPreview = OmitId<AppSchema.SubscriptionTier, Dates | 'enabled' | 'priceId' | 'productId'>
 
-export const TierCard: Component<{ tier: TierPreview; children?: any; class?: string }> = (
-  props
-) => {
+export const TierCard: Component<{
+  tier: TierPreview
+  children?: any
+  class?: string
+}> = (props) => {
   const stripeCost = createMemo(() => {
     const prices: any[] = []
     if (props.tier.cost > 0) {
@@ -47,12 +46,11 @@ export const TierCard: Component<{ tier: TierPreview; children?: any; class?: st
   return (
     <SolidCard
       border
-      class={`flex w-full flex-col justify-between gap-1 sm:w-1/2 ${props.class || ''}`}
+      class={`flex w-full flex-col justify-between gap-0.5 sm:w-1/2 ${props.class || ''}`}
+      title={props.tier.name}
+      size="sm"
     >
       <div>
-        <div class="flex justify-center text-lg font-bold text-[var(--hl-500)]">
-          {props.tier.name}
-        </div>
         <div class="markdown text-sm" innerHTML={markdown.makeHtml(props.tier.description)} />
       </div>
       <div>

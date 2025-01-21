@@ -83,8 +83,6 @@ export const SidePane: Component<{ show: (show: boolean) => void }> = (props) =>
 
 export const SagaPane: Component<{ close: () => void }> = (props) => {
   const [search, setSearch] = useSearchParams()
-
-  let templateRef: HTMLSelectElement
   const tabs = ['Template', 'Session']
 
   const state = sagaStore((g) => ({ list: g.templates, template: g.template, state: g.state }))
@@ -119,7 +117,6 @@ export const SagaPane: Component<{ close: () => void }> = (props) => {
   })
 
   const loadTemplate = () => {
-    console.log(templateRef.value, templateId())
     sagaStore.loadTemplate(templateId())
   }
 
@@ -294,7 +291,6 @@ export const SagaPane: Component<{ close: () => void }> = (props) => {
                   items={items()}
                   value={templateId()}
                   onChange={(ev) => setTemplateId(ev.value)}
-                  ref={(ref) => (templateRef = ref)}
                 />
                 <Button onClick={loadTemplate}>Load</Button>
               </div>
@@ -305,7 +301,7 @@ export const SagaPane: Component<{ close: () => void }> = (props) => {
             <TextInput
               fieldName="name"
               label="Name"
-              onInput={updateName}
+              onChange={updateName}
               value={state.template.name}
             />
           </Card>
@@ -325,7 +321,7 @@ export const SagaPane: Component<{ close: () => void }> = (props) => {
               fieldName="initTemplate"
               label="Initial Template"
               helperMarkdown="For generating the initial values for your introduction."
-              onInput={updateInit}
+              onChange={updateInit}
               value={state.template.init}
               isMultiline
             />
@@ -338,7 +334,7 @@ export const SagaPane: Component<{ close: () => void }> = (props) => {
               helperMarkdown="How to format your introduction. .\n\nYou can use any field derived from your **Initial Template**."
               placeholder="E.g. {{response}}"
               value={state.template.introduction}
-              onInputText={(ev) => sagaStore.updateTemplate({ introduction: ev })}
+              onChange={(ev) => sagaStore.updateTemplate({ introduction: ev.currentTarget.value })}
               isMultiline
             />
           </Card>
@@ -351,7 +347,7 @@ export const SagaPane: Component<{ close: () => void }> = (props) => {
            You can use any field derived from your templates."
               placeholder="E.g. {{response}}"
               value={state.template.display}
-              onInputText={(ev) => sagaStore.updateTemplate({ display: ev })}
+              onChange={(ev) => sagaStore.updateTemplate({ display: ev.currentTarget.value })}
               isMultiline
             />
           </Card>
@@ -374,7 +370,7 @@ export const SagaPane: Component<{ close: () => void }> = (props) => {
               helperMarkdown="Leave empty to disable image generation"
               placeholder="E.g. full body shot, {{image_caption}}, fantasy, anime art, studio lighting"
               value={state.template.imagePrompt}
-              onInputText={(ev) => sagaStore.updateTemplate({ imagePrompt: ev })}
+              onChange={(ev) => sagaStore.updateTemplate({ imagePrompt: ev.currentTarget.value })}
               isMultiline
             />
           </Card>
@@ -384,7 +380,7 @@ export const SagaPane: Component<{ close: () => void }> = (props) => {
               fieldName="historyTemplate"
               label="History Template"
               helperMarkdown="Use **{{history}}** in the game loop template"
-              onInput={updateHistory}
+              onChange={updateHistory}
               value={state.template.history}
               isMultiline
             />
@@ -395,7 +391,7 @@ export const SagaPane: Component<{ close: () => void }> = (props) => {
               fieldName="loopTemplate"
               label="Game Loop Template"
               helperMarkdown="Use **{{input}}** to use the user input"
-              onInput={updateLoop}
+              onChange={updateLoop}
               value={state.template.loop}
               isMultiline
             />
@@ -488,7 +484,7 @@ const ManualField: Component<{
         value={props.override}
         class="h-[28px] rounded-l-none rounded-r-md"
         placeholder={props.override ? props.override : '(Required) value'}
-        onInput={(ev) => props.setOverride(ev.currentTarget.value)}
+        onChange={(ev) => props.setOverride(ev.currentTarget.value)}
       />
     </div>
   )
@@ -535,7 +531,7 @@ const Field: Component<{
         value={props.field.label}
         class="h-[28px] rounded-l-none rounded-r-none"
         placeholder="Label"
-        onInput={(ev) => props.onChange({ label: ev.currentTarget.value })}
+        onChange={(ev) => props.onChange({ label: ev.currentTarget.value })}
       />
       <Switch>
         <Match when={props.field.list}>
@@ -544,7 +540,7 @@ const Field: Component<{
             value={props.override}
             class="h-[28px] rounded-l-none rounded-r-md"
             placeholder="(Optional) value"
-            onInput={(ev) => props.setOverride(ev.currentTarget.value)}
+            onChange={(ev) => props.setOverride(ev.currentTarget.value)}
           />
         </Match>
         <Match when={!props.field.list}>
@@ -553,7 +549,7 @@ const Field: Component<{
             value={props.override}
             class="h-[28px] rounded-l-none rounded-r-md"
             placeholder={value() ? `${value()}` : '(Optional) value'}
-            onInput={(ev) => props.setOverride(ev.currentTarget.value)}
+            onChange={(ev) => props.setOverride(ev.currentTarget.value)}
           />
         </Match>
       </Switch>

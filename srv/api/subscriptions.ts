@@ -7,8 +7,10 @@ import { store } from '../db'
 import { encryptText } from '../db/util'
 import billing, { stripe } from './billing'
 import { config } from '../config'
-import { publishAll } from './ws/handle'
 import { patreon } from './user/patreon'
+import { sendAll } from './ws'
+import { toSamplerOrder } from '/common/sampler-order'
+import { v4 } from 'uuid'
 
 const subSetting = {
   ...presetValidator,
@@ -34,11 +36,15 @@ const get = handle(async () => {
 
 const create = handle(async ({ body }) => {
   assertValid(subSetting, body)
+
+  const samplers = toSamplerOrder(body.service, body.order, body.disabledSamplers)
+
   const create = {
     ...body,
     subApiKey: body.subApiKey ? encryptText(body.subApiKey) : '',
-    order: body.order?.split(',').map((v) => +v),
-    disabledSamplers: body.disabledSamplers?.split(',').map((v) => +v),
+    order: samplers?.order,
+    disabledSamplers: samplers?.disabled,
+    _id: v4(),
   }
   const preset = await store.subs.createSubscription(create)
   return preset
@@ -46,11 +52,12 @@ const create = handle(async ({ body }) => {
 
 const update = handle(async ({ body, params }) => {
   assertValid(subSetting, body)
+  const samplers = toSamplerOrder(body.service, body.order, body.disabledSamplers)
   const update = {
     ...body,
     subApiKey: body.subApiKey ? encryptText(body.subApiKey) : '',
-    order: body.order?.split(',').map((v) => +v),
-    disabledSamplers: body.disabledSamplers?.split(',').map((v) => +v),
+    order: samplers?.order,
+    disabledSamplers: samplers?.disabled,
   }
 
   const preset = await store.subs.updateSubscription(params.id, update)
@@ -78,7 +85,7 @@ const replaceSubPreset = handle(async ({ body, params }) => {
 
   await store.subs.replaceSubscription(id, body.replacementId)
 
-  publishAll({
+  sendAll({
     type: 'subscription-replaced',
     subscriptionId: id,
     replacementId: body.replacementId,
@@ -166,14 +173,13 @@ router.get('/tiers', getTiers)
 router.get('/tiers/:id', getTier)
 router.use('/billing/subscribe', billing)
 
-router.use(isAdmin)
-router.get('/subscriptions', get)
-router.post('/subscriptions', create)
-router.post('/subscriptions/:id/replace', replaceSubPreset)
-router.post('/subscriptions/:id', update)
-router.delete('/subscriptions/:id', remove)
-router.post('/tiers', createTier)
-router.post('/tiers/:id', updateTier)
-router.get('/billing/products', getProducts)
+router.get('/subscriptions', isAdmin, get)
+router.post('/subscriptions', isAdmin, create)
+router.post('/subscriptions/:id/replace', isAdmin, replaceSubPreset)
+router.post('/subscriptions/:id', isAdmin, update)
+router.delete('/subscriptions/:id', isAdmin, remove)
+router.post('/tiers', isAdmin, createTier)
+router.post('/tiers/:id', isAdmin, updateTier)
+router.get('/billing/products', isAdmin, getProducts)
 
 export { router as default }

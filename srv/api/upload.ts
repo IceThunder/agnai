@@ -2,15 +2,16 @@ import { S3 } from '@aws-sdk/client-s3'
 import { mkdirpSync } from 'mkdirp'
 import { Request } from 'express'
 import { unlink, writeFile } from 'fs/promises'
-import { extname, resolve } from 'path'
+import { extname, normalize, resolve } from 'path'
 import { createReadStream, readdirSync } from 'fs'
 import { assertValid, Validator, UnwrapBody } from '/common/valid'
 import { config } from '../config'
+import { errors } from './wrap'
 
 const s3 = new S3({
   region: 'us-east-1',
   forcePathStyle: false,
-  endpoint: `https://${config.storage.endpoint}`,
+  endpoint: config.storage.endpoint ? `https://${config.storage.endpoint}` : undefined,
   credentials: {
     accessKeyId: config.storage.id,
     secretAccessKey: config.storage.key,
@@ -89,6 +90,10 @@ export async function upload(attachment: Attachment, name: string, ttl?: number)
       ContentType: attachment.type,
       ACL: 'public-read',
     })
+    if (config.cdnHostname) {
+      return `https://${config.cdnHostname}/assets/${filename}`
+    }
+
     return `/assets/` + filename
   }
 
@@ -111,19 +116,22 @@ export async function saveFile(filename: string, content: any, ttl?: number) {
   }
 
   if (ttl) {
-    setTimeout(() => unlink(resolve(config.assetFolder, filename)).catch((err) => err), ttl * 1000)
+    setTimeout(
+      () => unlink(safeRelativeResolve(config.assetFolder, filename)).catch((err) => err),
+      ttl * 1000
+    )
   }
-  await writeFile(resolve(config.assetFolder, filename), content, { encoding: 'utf8' })
+  await writeFile(safeRelativeResolve(config.assetFolder, filename), content, { encoding: 'utf8' })
   return `/assets/${filename}`
 }
 
 export async function saveBase64File(filename: string, content: any) {
-  await writeFile(resolve(config.assetFolder, filename), content, 'base64')
+  await writeFile(safeRelativeResolve(config.assetFolder, filename), content, 'base64')
   return `/assets/${filename}`
 }
 
 export function getFile(filename: string) {
-  const stream = createReadStream(resolve(config.assetFolder, filename))
+  const stream = createReadStream(safeRelativeResolve(config.assetFolder, filename))
   const type = getType(filename)
   return { stream, type }
 }
@@ -189,4 +197,15 @@ function isAllowedType(contentType: string) {
   }
 
   return false
+}
+
+/*
+ * Combine a root with a given filename, protecting against path traversal escaping the root.
+ */
+function safeRelativeResolve(root: string, filename: string) {
+  const resolved_path = normalize(resolve(root, filename))
+  if (!resolved_path.startsWith(root)) {
+    throw errors.BadRequest
+  }
+  return resolved_path
 }

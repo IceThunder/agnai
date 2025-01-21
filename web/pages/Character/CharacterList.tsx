@@ -1,11 +1,20 @@
-import { Component, Match, Show, Switch, createEffect, createMemo, createSignal } from 'solid-js'
-import { NewCharacter, characterStore, chatStore, settingStore, userStore } from '../../store'
+import {
+  Component,
+  Match,
+  Show,
+  Switch,
+  createEffect,
+  createMemo,
+  createSignal,
+  onMount,
+} from 'solid-js'
+import { NewCharacter, characterStore, chatStore, userStore } from '../../store'
 import { tagStore } from '../../store'
 import PageHeader from '../../shared/PageHeader'
 import Select, { Option } from '../../shared/Select'
 import TextInput from '../../shared/TextInput'
 import { AppSchema } from '../../../common/types/schema'
-import { Import, Plus, SortAsc, SortDesc, LayoutList, Image } from 'lucide-solid'
+import { Import, Plus, SortAsc, SortDesc, LayoutList, Image, RefreshCcw } from 'lucide-solid'
 import { A, useSearchParams } from '@solidjs/router'
 import ImportCharacterModal from '../Character/ImportCharacter'
 import DeleteCharacterModal from '../Character/DeleteCharacter'
@@ -21,6 +30,9 @@ import { CharacterFolderView } from './components/CharacterFolderView'
 import Modal from '/web/shared/Modal'
 import { CreateCharacterForm } from './CreateCharacterForm'
 import { ManualPaginate, usePagination } from '/web/shared/Paginate'
+import { Page } from '/web/Layout'
+import { DragDropProvider, DragDropSensors } from '@thisbeyond/solid-dnd'
+import { isMobile } from '/web/shared/hooks'
 
 const CACHE_KEY = 'agnai-charlist-cache'
 
@@ -50,7 +62,6 @@ const CharacterList: Component = () => {
 
   const chats = chatStore((s) => s.allChats)
   const tags = tagStore((s) => ({ filter: s.filter, hidden: s.hidden }))
-  const cfg = settingStore()
   const user = userStore()
 
   const state = chatStore((s) => {
@@ -64,6 +75,14 @@ const CharacterList: Component = () => {
 
       loading: s.allLoading,
       loaded: s.loaded,
+    }
+  })
+
+  onMount(() => {
+    const state = chatStore.getState()
+
+    if (!state.loaded && !state.allLoading) {
+      chatStore.getAllChats()
     }
   })
 
@@ -116,9 +135,11 @@ const CharacterList: Component = () => {
     characterStore.createCharacter(char, dequeue)
   }
 
+  const mobile = isMobile()
+
   const getNextView = (): ViewType => {
     const curr = view()
-    if (cfg.flags.folders) {
+    if (!mobile) {
       return curr === 'list' ? 'cards' : curr === 'cards' ? 'folders' : 'list'
     }
 
@@ -143,38 +164,39 @@ const CharacterList: Component = () => {
   })
 
   return (
-    <>
+    <Page>
       <PageHeader
         title={
           <div class="flex w-full justify-between">
             <div>Characters</div>
-            <div class="flex text-base">
-              <div class="px-1">
-                <Button onClick={() => setImport(true)}>
-                  <Import />
-                  <span class="hidden sm:inline">Import</span>
+            <div class="flex gap-2 text-base">
+              <Button onClick={() => setImport(true)}>
+                <Import />
+                <span class="hidden sm:inline">Import</span>
+              </Button>
+
+              <A href="/character/create">
+                <Button>
+                  <Plus />
+                  <span class="hidden sm:inline">Create</span>
                 </Button>
-              </div>
-              <div class="px-1">
-                <A href="/character/create">
-                  <Button>
-                    <Plus />
-                    <span class="hidden sm:inline">Create</span>
-                  </Button>
-                </A>
-              </div>
+              </A>
+
+              <Button onClick={() => chatStore.getAllChats()}>
+                <RefreshCcw />
+              </Button>
             </div>
           </div>
         }
       />
 
-      <div class="mb-2 flex justify-between">
+      <div class="ma mb-2 flex justify-between">
         <div class="flex flex-wrap">
           <div class="m-1 ml-0 mr-1">
             <TextInput
               fieldName="search"
               placeholder="Search by name..."
-              onKeyUp={(ev) => setSearch(ev.currentTarget.value)}
+              onChange={(ev) => setSearch(ev.currentTarget.value)}
             />
           </div>
 
@@ -222,10 +244,11 @@ const CharacterList: Component = () => {
           </div>
         </div>
       </div>
-      <div class="flex justify-center pb-2">
+      <div class="flex justify-center pb-2" classList={{ hidden: view() === 'folders' }}>
         <ManualPaginate pager={pager} />
       </div>
       <Characters
+        allCharacters={sortedChars()}
         characters={pager.items()}
         loading={state.loading || false}
         loaded={!!state.loaded}
@@ -235,7 +258,7 @@ const CharacterList: Component = () => {
         sortDirection={sortDirection()}
         favorites={favorites()}
       />
-      <div class="flex justify-center pb-5 pt-2">
+      <div class="flex justify-center pb-5 pt-2" classList={{ hidden: view() === 'folders' }}>
         <ManualPaginate pager={pager} />
       </div>
 
@@ -245,11 +268,12 @@ const CharacterList: Component = () => {
         close={() => setImport(false)}
         onSave={onImport}
       />
-    </>
+    </Page>
   )
 }
 
 const Characters: Component<{
+  allCharacters: AppSchema.Character[]
   characters: AppSchema.Character[]
   favorites: AppSchema.Character[]
   loading: boolean
@@ -282,64 +306,69 @@ const Characters: Component<{
   const [download, setDownload] = createSignal<AppSchema.Character>()
   return (
     <>
-      <Switch fallback={<div>Failed to load characters. Refresh to try again.</div>}>
-        <Match when={props.loading}>
-          <div class="flex justify-center">
-            <Loading />
-          </div>
-        </Match>
-        <Match when={props.characters.length === 0 && props.favorites.length === 0 && props.loaded}>
-          <NoCharacters />
-        </Match>
-        <Match when={props.loaded}>
-          <Show when={!props.type || props.type === 'list'}>
-            <CharacterListView
-              groups={groups()}
-              showGrouping={showGrouping()}
-              toggleFavorite={toggleFavorite}
-              setDownload={setDownload}
-              setDelete={setDelete}
-              setEdit={setEditChar}
-            />
-          </Show>
+      <DragDropProvider>
+        <DragDropSensors />
+        <Switch fallback={<div>Failed to load characters. Refresh to try again.</div>}>
+          <Match when={props.loading}>
+            <div class="flex justify-center">
+              <Loading />
+            </div>
+          </Match>
+          <Match
+            when={props.characters.length === 0 && props.favorites.length === 0 && props.loaded}
+          >
+            <NoCharacters />
+          </Match>
+          <Match when={props.loaded}>
+            <Show when={!props.type || props.type === 'list'}>
+              <CharacterListView
+                groups={groups()}
+                showGrouping={showGrouping()}
+                toggleFavorite={toggleFavorite}
+                setDownload={setDownload}
+                setDelete={setDelete}
+                setEdit={setEditChar}
+              />
+            </Show>
 
-          <Show when={props.type === 'cards'}>
-            <CharacterCardView
-              groups={groups()}
-              showGrouping={showGrouping()}
-              toggleFavorite={toggleFavorite}
-              setDelete={setDelete}
-              setDownload={setDownload}
-              setEdit={setEditChar}
-            />
-          </Show>
+            <Show when={props.type === 'cards'}>
+              <CharacterCardView
+                groups={groups()}
+                showGrouping={showGrouping()}
+                toggleFavorite={toggleFavorite}
+                setDelete={setDelete}
+                setDownload={setDownload}
+                setEdit={setEditChar}
+              />
+            </Show>
 
-          <Show when={props.type === 'folders'}>
-            <CharacterFolderView
-              groups={groups()}
-              showGrouping={showGrouping()}
-              toggleFavorite={toggleFavorite}
-              setDelete={setDelete}
-              setDownload={setDownload}
-              sort={props.sortDirection}
-              characters={props.characters}
-              setEdit={setEditChar}
-            />
-          </Show>
-        </Match>
-      </Switch>
+            <Show when={props.type === 'folders'}>
+              <CharacterFolderView
+                characters={props.allCharacters}
+                favorites={props.favorites}
+                groups={groups()}
+                showGrouping={showGrouping()}
+                toggleFavorite={toggleFavorite}
+                setDelete={setDelete}
+                setDownload={setDownload}
+                setEdit={setEditChar}
+              />
+            </Show>
+          </Match>
+        </Switch>
 
-      <Show when={download()}>
-        <DownloadModal show close={() => setDownload()} charId={download()!._id} />
-      </Show>
-      <Show when={editChar()}>
-        <EditCharacter char={editChar()} close={() => setEditChar()} />
-      </Show>
-      <DeleteCharacterModal
-        char={showDelete()}
-        show={!!showDelete()}
-        close={() => setDelete(undefined)}
-      />
+        <Show when={download()}>
+          <DownloadModal show close={() => setDownload()} charId={download()!._id} />
+        </Show>
+        <Show when={editChar()}>
+          <EditCharacter char={editChar()} close={() => setEditChar()} />
+        </Show>
+        <DeleteCharacterModal
+          char={showDelete()}
+          show={!!showDelete()}
+          close={() => setDelete(undefined)}
+        />
+      </DragDropProvider>
     </>
   )
 }

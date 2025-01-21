@@ -7,8 +7,8 @@ import { obtainLock, releaseLock } from './lock'
 import { AppSchema } from '../../../common/types/schema'
 import { v4 } from 'uuid'
 import { Response } from 'express'
-import { publishMany } from '../ws/handle'
 import { getScenarioEventType } from '/common/scenario'
+import { HydratedJson, jsonHydrator, parsePartialJson } from '/common/util'
 
 type GenRequest = UnwrapBody<typeof genValidator>
 
@@ -23,6 +23,8 @@ const sendValidator = {
   ],
   text: 'string',
   impersonate: 'any?',
+  parent: 'string?',
+  bot: 'boolean?',
 } as const
 
 const genValidator = {
@@ -64,11 +66,16 @@ const genValidator = {
     userEmbeds: 'any?',
   },
   lines: ['string'],
+  linesCount: 'number?',
   text: 'string?',
   settings: 'any?',
   lastMessage: 'string?',
   chatEmbeds: 'any?',
   userEmbeds: 'any?',
+  imageData: 'string?',
+  jsonSchema: 'any?',
+  jsonValues: 'any?',
+  response: 'string?',
 } as const
 
 export const getMessages = handle(async ({ userId, params, query }) => {
@@ -91,10 +98,11 @@ export const createMessage = handle(async (req) => {
   if (!userId) {
     const guest = req.socketId
     const newMsg = newMessage(v4(), chatId, body.text, {
-      userId: impersonate ? undefined : 'anon',
+      userId: body.bot || impersonate ? undefined : 'anon',
       characterId: impersonate?._id,
       ooc: body.kind === 'ooc' || body.kind === 'send-event:ooc',
       event: getScenarioEventType(body.kind),
+      parent: body.parent,
     })
     sendGuest(guest, { type: 'message-created', msg: newMsg, chatId })
   } else {
@@ -108,10 +116,14 @@ export const createMessage = handle(async (req) => {
       chatId,
       message: body.text,
       characterId: impersonate?._id,
-      senderId: userId,
+      senderId: body.bot ? undefined : userId,
       ooc: body.kind === 'ooc' || body.kind === 'send-event:ooc',
       event: getScenarioEventType(body.kind),
+      parent: body.parent,
+      name: impersonate?.name,
     })
+
+    await store.chats.update(chatId, { treeLeafId: userMsg._id })
 
     sendMany(members, { type: 'message-created', msg: userMsg, chatId })
   }
@@ -136,8 +148,7 @@ export const generateMessageV2 = handle(async (req, res) => {
     ? body.impersonate
     : await store.characters.getCharacter(userId, impersonateId)
 
-  const user = await store.users.getUser(userId)
-  body.user = user
+  body.user = req.authed
 
   const chat = await store.chats.getChatOnly(chatId)
   if (!chat) throw errors.NotFound
@@ -147,7 +158,7 @@ export const generateMessageV2 = handle(async (req, res) => {
   }
 
   // Coalesce for backwards compatibly while new UI rolls out
-  const replyAs = body.replyAs._id.startsWith('temp-')
+  const replyAs: AppSchema.Character = body.replyAs._id.startsWith('temp-')
     ? body.replyAs
     : await store.characters.getCharacter(chat.userId, body.replyAs._id || body.char._id)
 
@@ -179,6 +190,7 @@ export const generateMessageV2 = handle(async (req, res) => {
       ooc: body.kind === 'ooc',
       event: undefined,
       parent: body.parent,
+      name: impersonate?.name,
     })
 
     sendMany(members, { type: 'message-created', msg: userMsg, chatId })
@@ -191,6 +203,7 @@ export const generateMessageV2 = handle(async (req, res) => {
       ooc: false,
       event: getScenarioEventType(body.kind),
       parent: body.parent,
+      name: replyAs?.name,
     })
     sendMany(members, { type: 'message-created', msg: userMsg, chatId })
   }
@@ -198,6 +211,13 @@ export const generateMessageV2 = handle(async (req, res) => {
   if (body.kind === 'ooc' || !replyAs) {
     return { success: true }
   }
+
+  const messageId =
+    body.kind === 'retry'
+      ? body.replacing?._id ?? requestId
+      : body.kind === 'continue'
+      ? body.continuing?._id
+      : requestId
 
   /**
    * For group chats we won't worry about lock integrity.
@@ -213,6 +233,8 @@ export const generateMessageV2 = handle(async (req, res) => {
       success: true,
       generating: false,
       message: 'User message created',
+      messageId,
+      created: userMsg,
     })
   }
 
@@ -226,108 +248,157 @@ export const generateMessageV2 = handle(async (req, res) => {
     })
   }
 
-  res.json({ requestId, success: true, generating: true, message: 'Generating message' })
-
   const entities = await getResponseEntities(chat, body.sender.userId, body.settings)
-  const { stream, adapter, ...metadata } = await createChatStream(
-    { ...body, chat, replyAs, impersonate, requestId, entities },
-    log
-  )
+  const schema = entities.gen.jsonSource === 'character' ? replyAs.json : entities.gen.json
+  const hydrator = entities.gen.jsonEnabled && schema ? jsonHydrator(schema) : undefined
 
-  log.setBindings({ adapter })
+  let hydration: HydratedJson | undefined
+  let jsonPartial: any
 
-  let generated = ''
+  let generated = body.response || ''
   let retries: string[] = []
   let error = false
-  let meta = { ctx: metadata.settings.maxContextLength, char: metadata.size, len: metadata.length }
+  let adapter = 'local'
+  let meta: Record<string, any> = {}
+  let probs: any
 
-  const messageId =
-    body.kind === 'retry'
-      ? body.replacing?._id ?? requestId
-      : body.kind === 'continue'
-      ? body.continuing?._id
-      : requestId
+  if (body.response === undefined) {
+    const chatStream = await createChatStream(
+      {
+        ...body,
+        linesCount: body.linesCount,
+        chat,
+        replyAs,
+        impersonate,
+        requestId,
+        entities,
+        chatSchema: schema,
+      },
+      log
+    ).catch((err) => ({ err }))
 
-  try {
-    for await (const gen of stream) {
-      if (typeof gen === 'string') {
-        generated = gen
-        continue
+    if ('err' in chatStream) {
+      throw chatStream.err
+    }
+
+    res.json({
+      requestId,
+      success: true,
+      generating: true,
+      message: 'Generating message',
+      messageId,
+      created: userMsg,
+    })
+
+    const { stream, ...metadata } = chatStream
+
+    adapter = metadata.adapter
+
+    meta = {
+      ctx: metadata.settings.maxContextLength,
+      char: metadata.size,
+      len: metadata.length,
+    }
+    log.setBindings({ adapter })
+
+    try {
+      for await (const gen of stream) {
+        if (typeof gen === 'string') {
+          generated = gen
+          continue
+        }
+
+        if ('tokens' in gen) {
+          generated = gen.tokens as string
+        }
+
+        if ('gens' in gen) {
+          retries = gen.gens
+          break
+        }
+
+        if ('partial' in gen) {
+          const prefix = body.kind === 'continue' ? `${body.continuing.msg} ` : ''
+          if (metadata.json && hydrator) {
+            jsonPartial = parsePartialJson(gen.partial) || jsonPartial
+            hydration = hydrator(jsonPartial || {})
+          }
+
+          sendMany(members, {
+            requestId: body.requestId,
+            type: 'message-partial',
+            kind: body.kind,
+            partial: hydration ? hydration.response : `${prefix}${gen.partial}`,
+            json: hydration,
+            adapter,
+            chatId,
+          })
+          continue
+        }
+
+        if ('meta' in gen) {
+          Object.assign(meta, gen.meta)
+          continue
+        }
+
+        if ('prompt' in gen) {
+          sendOne(userId, { type: 'service-prompt', id: messageId, prompt: gen.prompt })
+          continue
+        }
+
+        if ('error' in gen) {
+          error = true
+          sendMany(members, { type: 'message-error', requestId, error: gen.error, adapter, chatId })
+          continue
+        }
+
+        if ('warning' in gen) {
+          sendOne(userId, { type: 'message-warning', requestId, warning: gen.warning })
+        }
       }
+    } catch (ex: any) {
+      error = true
 
-      if ('tokens' in gen) {
-        generated = gen.tokens as string
-      }
-
-      if ('gens' in gen) {
-        retries = gen.gens
-        break
-      }
-
-      if ('partial' in gen) {
-        const prefix = body.kind === 'continue' ? `${body.continuing.msg} ` : ''
+      if (ex instanceof StatusError) {
+        log.warn({ err: ex }, `[${ex.status}] Stream handler exception`)
         sendMany(members, {
-          type: 'message-partial',
-          kind: body.kind,
-          partial: `${prefix}${gen.partial}`,
+          type: 'message-error',
+          requestId,
+          error: `[${ex.status}] Message failed: ${ex?.message || ex}`,
           adapter,
           chatId,
         })
-        continue
-      }
-
-      if ('meta' in gen) {
-        Object.assign(meta, gen.meta)
-        continue
-      }
-
-      if ('prompt' in gen) {
-        sendOne(userId, { type: 'service-prompt', id: messageId, prompt: gen.prompt })
-        continue
-      }
-
-      if ('error' in gen) {
-        error = true
-        sendMany(members, { type: 'message-error', requestId, error: gen.error, adapter, chatId })
-        continue
-      }
-
-      if ('warning' in gen) {
-        sendOne(userId, { type: 'message-warning', requestId, warning: gen.warning })
+      } else {
+        log.error({ err: ex }, 'Unhandled exception occurred during stream handler')
+        sendMany(members, {
+          type: 'message-error',
+          requestId,
+          error: `Unhandled exception: ${ex?.message || ex}`,
+          adapter,
+          chatId,
+        })
       }
     }
-  } catch (ex: any) {
-    error = true
 
-    if (ex instanceof StatusError) {
-      log.warn({ err: ex }, `[${ex.status}] Stream handler exception`)
-      sendMany(members, {
-        type: 'message-error',
-        requestId,
-        error: `[${ex.status}] Message failed: ${ex?.message || ex}`,
-        adapter,
-        chatId,
-      })
-    } else {
-      log.error({ err: ex }, 'Unhandled exception occurred during stream handler')
-      sendMany(members, {
-        type: 'message-error',
-        requestId,
-        error: `Unhandled exception: ${ex?.message || ex}`,
-        adapter,
-        chatId,
-      })
+    await releaseLock(chatId)
+    if (error) {
+      return
     }
   }
 
-  await releaseLock(chatId)
-  if (error) {
-    return
+  if (meta.probs) {
+    probs = meta.probs
+    delete meta.probs
   }
 
-  const responseText = body.kind === 'continue' ? `${body.continuing.msg} ${generated}` : generated
+  let responseText = body.kind === 'continue' ? `${body.continuing.msg} ${generated}` : generated
   const parent = getNewMessageParent(body, userMsg)
-  const actions: AppSchema.ChatAction[] = []
+  const updatedAt = new Date().toISOString()
+
+  if (hydration?.response) {
+    responseText = hydration.response
+  }
+
   let treeLeafId = ''
 
   switch (body.kind) {
@@ -360,12 +431,15 @@ export const generateMessageV2 = handle(async (req, res) => {
         message: responseText,
         adapter,
         ooc: false,
-        actions,
         meta,
         retries,
         event: undefined,
         parent,
+        json: hydration,
+        name: replyAs.name,
       })
+
+      msg.meta.probs = probs
 
       sendMany(members, {
         type: 'message-created',
@@ -374,7 +448,7 @@ export const generateMessageV2 = handle(async (req, res) => {
         chatId,
         adapter,
         generate: true,
-        actions,
+        json: hydration,
       })
       treeLeafId = requestId
       break
@@ -386,27 +460,29 @@ export const generateMessageV2 = handle(async (req, res) => {
           .concat(retries)
           .concat(body.replacing.retries || [])
 
-        await store.msgs.editMessage(body.replacing._id, {
+        const next = await store.msgs.editMessage(body.replacing._id, {
           msg: responseText,
-          parent,
-          actions,
           adapter,
           meta,
           state: 'retried',
           retries: nextRetries,
+          parent: body.parent,
+          json: hydration ? hydration : (null as any),
         })
         treeLeafId = body.replacing._id
+        meta.probs = probs
         sendMany(members, {
           type: 'message-retry',
           requestId,
           chatId,
           messageId: body.replacing._id,
-          message: responseText,
-          retries: nextRetries,
-          actions,
+          message: next?.msg,
+          retries: next?.retries,
           adapter,
           generate: true,
           meta,
+          updatedAt: next?.updatedAt,
+          json: hydration,
         })
       } else {
         const msg = await store.msgs.createChatMessage({
@@ -415,13 +491,15 @@ export const generateMessageV2 = handle(async (req, res) => {
           characterId: replyAs._id,
           message: responseText,
           adapter,
-          actions,
           ooc: false,
           meta,
           retries,
           event: undefined,
           parent,
+          json: hydration,
+          name: replyAs.name,
         })
+        msg.meta.probs = probs
         treeLeafId = requestId
         sendMany(members, {
           type: 'message-created',
@@ -430,20 +508,21 @@ export const generateMessageV2 = handle(async (req, res) => {
           chatId,
           adapter,
           generate: true,
-          actions,
+          json: hydration,
         })
       }
       break
     }
 
     case 'continue': {
-      await store.msgs.editMessage(body.continuing._id, {
+      const next = await store.msgs.editMessage(body.continuing._id, {
         msg: responseText,
         adapter,
         meta,
         state: 'continued',
       })
       treeLeafId = body.continuing._id
+      meta.probs = probs
       sendMany(members, {
         type: 'message-retry',
         requestId,
@@ -452,16 +531,18 @@ export const generateMessageV2 = handle(async (req, res) => {
         message: responseText,
         adapter,
         generate: true,
+        retries: next?.retries,
         meta,
+        updatedAt,
       })
       break
     }
   }
 
   if (treeLeafId) {
-    await store.chats.update(chatId, { treeLeafId })
+    await store.chats.update(chatId, { treeLeafId, updatedAt })
   } else {
-    await store.chats.update(chatId, {})
+    await store.chats.update(chatId, { updatedAt })
   }
 })
 
@@ -511,68 +592,100 @@ async function handleGuestGenerate(body: GenRequest, req: AppRequest, res: Respo
     return { success: true }
   }
 
-  res.json({ success: true, generating: true, message: 'Generating message', requestId })
-
-  const { stream, adapter, ...entities } = await createChatStream(
-    { ...body, chat, replyAs, requestId },
-    log,
-    guest
-  )
-
-  log.setBindings({ adapter })
-
-  let generated = ''
+  const schema = body.settings.jsonSource === 'character' ? body.char.json : body.settings.json
+  const hydrator = body.settings.jsonEnabled && schema ? jsonHydrator(schema) : undefined
+  let generated = body.response || ''
   let retries: string[] = []
   let error = false
-  let meta = { ctx: entities.settings.maxContextLength, char: entities.size, len: entities.length }
+  let adapter = 'local'
+  let meta = {}
+  let hydration: HydratedJson | undefined
+  let jsonPartial: any
 
-  for await (const gen of stream) {
-    if (typeof gen === 'string') {
-      generated = gen
-      continue
+  if (body.response === undefined) {
+    const chatStream = await createChatStream(
+      { ...body, chat, replyAs, requestId, chatSchema: schema, linesCount: body.linesCount },
+      log,
+      guest
+    )
+
+    if ('err' in chatStream) {
+      throw chatStream.err
     }
 
-    if ('tokens' in gen) {
-      generated = gen.tokens as string
+    const { stream, ...entities } = chatStream
+
+    res.json({ success: true, generating: true, message: 'Generating message', requestId })
+
+    log.setBindings({ adapter })
+
+    adapter = entities.adapter
+    meta = { ctx: entities.settings.maxContextLength, char: entities.size, len: entities.length }
+
+    for await (const gen of stream) {
+      if (typeof gen === 'string') {
+        generated = gen
+        continue
+      }
+
+      if ('tokens' in gen) {
+        generated = gen.tokens as string
+      }
+
+      if ('gens' in gen) {
+        retries = gen.gens
+        break
+      }
+
+      if ('partial' in gen) {
+        if (entities.json && hydrator) {
+          jsonPartial = parsePartialJson(gen.partial) || jsonPartial
+          hydration = hydrator(jsonPartial || {})
+        }
+        sendGuest(guest, {
+          type: 'message-partial',
+          kind: body.kind,
+          partial: hydration ? hydration.response : gen.partial,
+          adapter,
+          chatId,
+          json: hydration,
+        })
+
+        continue
+      }
+
+      if ('meta' in gen) {
+        Object.assign(meta, gen.meta)
+        continue
+      }
+
+      if ('prompt' in gen) {
+        sendGuest(guest, { type: 'service-prompt', id: messageId, prompt: gen.prompt })
+        continue
+      }
+
+      if ('error' in gen) {
+        error = true
+        sendGuest(guest, { type: 'message-error', error: gen.error, adapter, chatId })
+        break
+      }
+
+      if ('warning' in gen) {
+        sendGuest(guest, { type: 'message-warning', requestId, warning: gen.warning })
+        continue
+      }
     }
 
-    if ('gens' in gen) {
-      retries = gen.gens
-      break
-    }
-
-    if ('partial' in gen) {
-      sendGuest(guest, { type: 'message-partial', partial: gen.partial, adapter, chatId })
-      continue
-    }
-
-    if ('meta' in gen) {
-      Object.assign(meta, gen.meta)
-      continue
-    }
-
-    if ('prompt' in gen) {
-      sendGuest(guest, { type: 'service-prompt', id: messageId, prompt: gen.prompt })
-      continue
-    }
-
-    if ('error' in gen) {
-      error = true
-      sendGuest(guest, { type: 'message-error', error: gen.error, adapter, chatId })
-      break
-    }
-
-    if ('warning' in gen) {
-      sendGuest(guest, { type: 'message-warning', requestId, warning: gen.warning })
-      continue
-    }
+    if (error) return
   }
 
-  if (error) return
+  let responseText = body.kind === 'continue' ? `${body.continuing.msg} ${generated}` : generated
+  if (hydration?.response) {
+    responseText = hydration.response
+  }
 
-  const responseText = body.kind === 'continue' ? `${body.continuing.msg} ${generated}` : generated
-
-  const characterId = body.kind === 'self' ? undefined : body.replyAs?._id || body.char?._id
+  const characterId =
+    body.kind === 'self' ? body.impersonate?._id : body.replyAs?._id || body.char?._id
   const senderId = body.kind === 'self' ? 'anon' : undefined
   const parent = getNewMessageParent(body, newMsg)
 
@@ -588,6 +701,7 @@ async function handleGuestGenerate(body: GenRequest, req: AppRequest, res: Respo
     event: undefined,
     retries,
     parent,
+    json: hydration,
   })
 
   switch (body.kind) {
@@ -612,6 +726,7 @@ async function handleGuestGenerate(body: GenRequest, req: AppRequest, res: Respo
         continue: body.kind === 'continue',
         generate: true,
         meta,
+        json: hydration,
       })
       return
   }
@@ -629,6 +744,7 @@ function newMessage(
     event: undefined | AppSchema.ScenarioEventType
     retries?: string[]
     parent?: string
+    json?: HydratedJson
   }
 ) {
   const userMsg: AppSchema.ChatMessage = {
@@ -669,7 +785,7 @@ async function ensureBotMembership(
     // Ensure the caller's character is up to date
     Object.assign(impersonate, actual)
     characters[impersonate._id] = false
-    publishMany(members, {
+    sendMany(members, {
       type: 'chat-character-added',
       chatId: chat._id,
       character: actual,
@@ -683,15 +799,18 @@ async function ensureBotMembership(
 
 function getNewMessageParent(body: GenRequest, userMsg: AppSchema.ChatMessage | undefined): string {
   switch (body.kind) {
+    case 'continue': {
+      return body.continuing?.parent
+    }
+
     case 'summary':
     case 'chat-query':
       return ''
 
     case 'retry':
-    case 'continue':
+    case 'request':
       return body.parent || ''
 
-    case 'request':
     case 'ooc':
     case 'self':
     case 'send':

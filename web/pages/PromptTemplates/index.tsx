@@ -1,17 +1,17 @@
-import { Component, For, Show, createMemo, createSignal, onMount } from 'solid-js'
+import { Component, For, Show, createEffect, createMemo, createSignal, on, onMount } from 'solid-js'
 import PageHeader from '/web/shared/PageHeader'
 import Button from '/web/shared/Button'
 import { presetStore } from '/web/store/presets'
 import { Copy, Plus, Save, Trash } from 'lucide-solid'
 import Divider from '/web/shared/Divider'
 import { templates } from '../../../common/presets/templates'
-import { useRootModal } from '/web/shared/hooks'
-import Modal from '/web/shared/Modal'
+import { RootModal } from '/web/shared/Modal'
 import PromptEditor from '/web/shared/PromptEditor'
 import TextInput from '/web/shared/TextInput'
 import { AppSchema } from '/common/types'
-import { getStrictForm } from '/web/shared/util'
 import { toastStore } from '/web/store'
+import { Page } from '/web/Layout'
+import { createStore } from 'solid-js/store'
 
 export { PromptTemplates as default }
 
@@ -40,7 +40,7 @@ const PromptTemplates: Component = () => {
   }
 
   return (
-    <>
+    <Page>
       <PageHeader title="Prompt Templates" />
 
       <div class="flex w-full flex-col gap-4">
@@ -106,7 +106,7 @@ const PromptTemplates: Component = () => {
         </div>
       </div>
       <TemplateModal show={show()} close={close} initial={initial()} edit={edit()} />
-    </>
+    </Page>
   )
 }
 
@@ -116,15 +116,21 @@ const TemplateModal: Component<{
   initial?: string
   close: () => void
 }> = (props) => {
-  let form: HTMLFormElement
+  const [store, setStore] = createStore({ name: '', template: '' })
+
+  createEffect(
+    on(
+      () => props.edit,
+      (edit) => {
+        if (!edit) return
+
+        setStore({ name: edit.name, template: edit.template })
+      }
+    )
+  )
 
   const submit = () => {
-    const { name, template } = getStrictForm(form, { name: 'string', template: 'string' })
-
-    form.reportValidity()
-    if (!form.checkValidity()) {
-      return
-    }
+    const { name, template } = store
 
     if (props.edit) {
       presetStore.updateTemplate(props.edit._id, { name, template }, () => {
@@ -134,7 +140,7 @@ const TemplateModal: Component<{
       return
     }
 
-    presetStore.createTemplate(name, template, () => {
+    presetStore.createTemplate(name, template, '', () => {
       toastStore.success('Template created')
       props.close()
     })
@@ -151,34 +157,29 @@ const TemplateModal: Component<{
     </>
   )
 
-  useRootModal({
-    id: 'prompt-templates',
-    element: (
-      <Modal
-        title={'Prompt Templates'}
-        maxWidth="half"
-        show={props.show}
-        close={props.close}
-        footer={Footer}
-      >
-        <form ref={form!} class="flex flex-col gap-4 text-sm">
-          <TextInput
-            fieldName="name"
-            placeholder="Name"
-            label="Name"
-            value={props.edit?.name || ''}
-            required
-          />
-          <PromptEditor
-            fieldName="template"
-            value={props.edit?.template || props.initial || ''}
-            minHeight={100}
-            showHelp
-          />
-        </form>
-      </Modal>
-    ),
-  })
-
-  return null
+  return (
+    <RootModal
+      title={'Prompt Templates'}
+      maxWidth="half"
+      show={props.show}
+      close={props.close}
+      footer={Footer}
+    >
+      <form class="flex flex-col gap-4 text-sm">
+        <TextInput
+          placeholder="Name"
+          label="Name"
+          value={store.name}
+          onChange={(ev) => setStore('name', ev.currentTarget.value)}
+          required
+        />
+        <PromptEditor
+          value={store.template}
+          onChange={(ev) => setStore('template', ev.prompt!)}
+          minHeight={100}
+          showHelp
+        />
+      </form>
+    </RootModal>
+  )
 }

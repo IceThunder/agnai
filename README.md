@@ -1,34 +1,40 @@
 # Agnaistic
 
-> AI Roleplay Chat with Personalised Characters with your favorite AI services.
+> AI Roleplay Chat with Personalized Characters using your favorite AI services.
 
 [Live Version](https://agnai.chat) | [Discord](https://discord.agnai.chat)
 
-You can visit the live version at [Agnai.chat](https://agnai.chat)
+Visit the live version at [Agnai.chat](https://agnai.chat).
 
-Based upon the early work of https://github.com/PygmalionAI/galatea-ui.
+Based on the early work of [Galatea-UI by PygmalionAI](https://github.com/PygmalionAI/galatea-ui).
+
+---
 
 ## Quick Start
 
 **Important!** _MongoDB and Redis are optional! Agnaistic will run in "Guest Only" mode if MongoDB is not available._
 
-**Agnaistic** is published as an NPM package and can be installed globally:
+Agnaistic is published as an NPM package and can be installed globally:
 
 ```sh
 # Install or update:
-> npm install agnai -g
-> agnai
+npm install agnai -g
+agnai
 
 # View launch options:
-> agnai help
+agnai help
 
 # Run with the Pipeline features
-> agnai --pipeline
+agnai --pipeline
+
 
 ```
 
 When using the NPM package, your images and JSON files will be stored in: `HOME_FOLDER/.agnai`.  
-E.g. Linux: `/home/sceuick/.agnai/` Mac: `/Users/sceuick/.agnai` Windows: `C:\Users\sceuick\.agnai`.
+Examples:<br>
+Linux: `/home/sceuick/.agnai/`<br>
+Mac: `/Users/sceuick/.agnai`<br>
+Windows: `C:\Users\sceuick\.agnai`.
 
 ## Features
 
@@ -139,7 +145,7 @@ The important parts of the stack are:
 # If required, this will update the dependencies before running the API
 > npm run model # Install poetry into a virtual environment
 
-# Run everything with a single commmand:
+# Run everything with a single command:
 > npm run start:all # Linux and OSX
 > npm run start:all:win # Windows
 ```
@@ -153,7 +159,7 @@ You can also try to access the frontend with hot reloading at http://localhost:1
 - Redux Dev Tools
   - The front-end application state is wired up to the "Redux Dev Tools" Chrome extension.
 - NodeJS debugger
-  - The `pnpm start` script launchs the NodeJS API using the `--inspect` flag
+  - The `pnpm start` script launches the NodeJS API using the `--inspect` flag
   - Attach using the default launch task in VSCode (`F5`)
   - Or go to the url `chrome://inspect` to use the debugger
 - Python dependency management using `Poetry` - https://python-poetry.org/docs/cli
@@ -170,3 +176,5 @@ $ pnpm run format:fix
 # runs the TypeScript compiler so any type errors will be shown
 $ pnpm run typecheck
 ```
+
+This project is tested with BrowserStack.

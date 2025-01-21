@@ -8,8 +8,9 @@ import { createApp } from './app'
 import { config } from './config'
 import { store } from './db'
 import { connect, createIndexes } from './db/client'
-import { logger } from './logger'
+import { logger } from './middleware'
 import { setupDomain } from './domains'
+import { prepSubscriptionCache, prepTierCache } from './db/subscriptions'
 const pkg = require('../package.json')
 
 export async function start() {
@@ -24,15 +25,16 @@ export async function start() {
   })
 
   process.on('uncaughtException', (ex) => {
-    logger.error({ msg: ex?.message, err: ex }, 'Unhandled exception')
+    logger.error({ msg: ex?.message, err: ex, stack: ex.stack }, 'Unhandled exception')
   })
 
   process.on('unhandledRejection', (ex: any) => {
-    logger.error({ msg: ex?.message, err: ex }, 'Unhandled rejection')
+    logger.error({ msg: ex?.message, err: ex, stack: ex.stack }, 'Unhandled rejection')
   })
 
   prepareTokenizers()
   await Promise.allSettled([initDb(), initMessageBus()])
+  await Promise.allSettled([prepSubscriptionCache(), prepTierCache()])
 
   server.on('error', (err) => {
     logger.error({ cause: err.message }, 'Failed to start API')

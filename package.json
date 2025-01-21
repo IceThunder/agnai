@@ -8,6 +8,7 @@
     "agnaistic": "./srv/bin.js",
     "agnai": "./srv/bin.js"
   },
+  "browserslist": "> 0.1%, not ie 11",
   "homepage": "https://github.com/agnaistic/agnai/issues",
   "files": [
     "poetry.lock",
@@ -67,6 +68,7 @@
     "test": "mocha --inline-diffs --exit \"tests/**.spec.js\"",
     "snapshot": "mocha --inline-diffs --exit \"tests/**.spec.js\" --update",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check": "pnpm typecheck && pnpm test",
     "checks": "pnpm format && pnpm typecheck && pnpm test",
     "up": "docker compose -p agnai up -d",
     "deps": "npx --yes pnpm@8.6.2 install --lockfile",
@@ -79,6 +81,7 @@
     "@aws-sdk/client-s3": "^3.309.0",
     "@css-hooks/solid": "^1.0.1",
     "@dqbd/tiktoken": "^1.0.2",
+    "@thisbeyond/solid-dnd": "^0.7.5",
     "adm-zip": "^0.5.10",
     "bcryptjs": "^2.4.3",
     "chance": "^1.1.11",
@@ -89,7 +92,10 @@
     "easy-speech": "^2.3.1",
     "evtstore": "^12.0.1",
     "express": "^4.18.2",
+    "google-auth-library": "^9.11.0",
     "gpt-3-encoder": "^1.1.4",
+    "iconv-lite": "0.6.3",
+    "js-tiktoken": "^1.0.14",
     "jsonwebtoken": "^9.0.0",
     "localtunnel": "^2.0.2",
     "minimist": "^1.2.8",
@@ -100,11 +106,13 @@
     "multer": "1.4.5-lts.1",
     "nai-js-tokenizer": "1.0.1",
     "needle": "^3.2.0",
+    "partial-json": "^0.1.7",
     "patreon-api.ts": "^0.1.0",
     "peggy": "^3.0.2",
     "pino": "^8.10.0",
     "pino-pretty": "^9.2.0",
     "redis": "^4.6.5",
+    "shepherd.js": "^13.0.3",
     "stripe": "^13.7.0",
     "throng": "^5.0.0",
     "uuid": "^9.0.0",
@@ -146,6 +154,7 @@
     "assert": "^2.0.0",
     "babel-preset-solid": "^1.6.9",
     "browserify-zlib": "^0.2.0",
+    "browserslist": "^4.24.2",
     "buffer": "^5.5.0",
     "chai": "^4.3.7",
     "concurrently": "^7.6.0",
@@ -155,6 +164,7 @@
     "exifreader": "^4.13.0",
     "https-browserify": "^1.0.0",
     "js-cookie": "^3.0.1",
+    "jwt-decode": "^4.0.0",
     "libsodium-wrappers-sumo": "^0.7.11",
     "localforage": "^1.10.0",
     "lucide-solid": "0.356.0",
@@ -176,18 +186,28 @@
     "querystring-es3": "^0.2.1",
     "showdown": "^2.1.0",
     "solid-js": "1.8.17",
+    "solid-refresh": "^0.7.5",
     "sortablejs": "^1.15.0",
     "stream-browserify": "^3.0.0",
     "stream-http": "^3.2.0",
     "string_decoder": "^1.3.0",
     "tailwindcss": "^3.3.2",
-    "typescript": "^5.4.4",
+    "typescript": "^5.4.5",
     "url": "^0.11.1",
     "util": "^0.12.3",
     "values.js": "^2.1.1",
+    "vite": "^5.3.3",
+    "vite-plugin-solid": "^2.10.2",
+    "vite-tsconfig-paths": "^4.3.2",
     "zustand": "^4.5.2"
+  },
+  "@parcel/resolver-default": {
+    "packageExports": true
   },
   "alias": {
     "easy-speech": "easy-speech/dist/EasySpeech.cjs.js"
+  },
+  "exports": {
+    "easy-speech": "./node_modules/easy-speech/dist/EasySpeech.cjs.js"
   }
 }

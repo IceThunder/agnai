@@ -27,6 +27,31 @@ export function assertValid<T extends Validator>(
   }
 }
 
+/**
+ * @destructive
+ * Removes top-level properties from the object that aren't in the validator
+ */
+export function assertStrict<T extends Validator>(
+  opts: {
+    type: T
+    partial?: boolean
+    error?: string
+  },
+  compare: any
+): asserts compare is UnwrapBody<T> {
+  const { type, partial } = opts
+  const { errors } = validateBody(type, compare, { notThrow: true, partial })
+  if (errors.length) {
+    throw new Error(`${opts.error || 'Request body is invalid'}: ${errors.join(', ')}`)
+  }
+
+  for (const key in compare) {
+    if (key in type === false) {
+      delete compare[key]
+    }
+  }
+}
+
 export function isValidPartial<T extends Validator>(
   type: T,
   compare: any
@@ -36,21 +61,21 @@ export function isValidPartial<T extends Validator>(
 }
 
 export function validateBody<T extends Validator>(
-  type: T,
+  guard: T,
   compare: any,
   opts: { partial?: boolean; prefix?: string; notThrow?: boolean } = {}
-): { errors: string[]; actual: UnwrapBody<T> } {
+): { errors: string[]; actual: UnwrapBody<T>; original: UnwrapBody<T> } {
   const prefix = opts.prefix ? `${opts.prefix}.` : ''
   const errors: string[] = []
   const actual: any = {}
 
-  if (!compare && '?' in type && (type as any)['?'] === '?') {
-    return { errors, actual }
+  if (!compare && '?' in guard && (guard as any)['?'] === '?') {
+    return { errors, actual, original: compare }
   }
 
-  start: for (const key in type) {
+  start: for (const key in guard) {
     const prop = `${prefix}${key}`
-    const bodyType = type[key]
+    const bodyType = guard[key]
     let value
     try {
       value = compare?.[key]
@@ -164,7 +189,7 @@ export function validateBody<T extends Validator>(
 
       if (typeof value !== 'string') {
         errors.push(
-          `.${prop} is ${typeof value}, expected undefined or literal of ${bodyType
+          `.${prop} is ${typeof value} ('${value}'), expected undefined or literal of ${bodyType
             .filter((v) => v !== null)
             .join(' | ')}`
         )
@@ -173,7 +198,7 @@ export function validateBody<T extends Validator>(
 
       if (bodyType.includes(value) === false) {
         errors.push(
-          `.${prop} value is invalid, expected undefined or literal of ${bodyType
+          `.${prop} value is invalid ('${value}'), expected undefined or literal of ${bodyType
             .filter((v) => v !== null)
             .join(' | ')}`
         )
@@ -184,12 +209,16 @@ export function validateBody<T extends Validator>(
     }
     if (isUnion(bodyType)) {
       if (typeof value !== 'string') {
-        errors.push(`.${prop} is ${typeof value}, expected literal of ${bodyType.join(' | ')}`)
+        errors.push(
+          `.${prop} is ${typeof value} ('${value}'), expected literal of ${bodyType.join(' | ')}`
+        )
         continue start
       }
 
       if (bodyType.includes(value) === false) {
-        errors.push(`.${prop} value is invalid, expected literal of ${bodyType.join(' | ')}`)
+        errors.push(
+          `.${prop} value is invalid ('${value}'), expected literal of ${bodyType.join(' | ')}`
+        )
         continue start
       }
 
@@ -217,5 +246,5 @@ export function validateBody<T extends Validator>(
     throw new Error(`Object does not match type: ${errors.join(', ')}`)
   }
 
-  return { errors, actual }
+  return { errors, actual, original: compare }
 }

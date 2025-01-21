@@ -1,10 +1,10 @@
 import * as horde from '../../common/horde-gen'
-import { sanitise, trimResponseV2 } from '../api/chat/common'
 import { HORDE_GUEST_KEY, getHordeModels } from '../api/horde'
-import { publishOne } from '../api/ws/handle'
+import { sendOne } from '../api/ws'
 import { decryptText } from '../db/util'
-import { logger } from '../logger'
+import { logger } from '../middleware'
 import { ModelAdapter } from './type'
+import { sanitise, trimResponseV2 } from '/common/requests/util'
 import { toArray } from '/common/util'
 
 export const handleHorde: ModelAdapter = async function* ({
@@ -50,7 +50,7 @@ export const handleHorde: ModelAdapter = async function* ({
     ])
 
     // This is a temporary measure to help users provide more info when reporting instances of 'cut off' responses
-    publishOne(guest || user._id, {
+    sendOne(guest || user._id, {
       type: 'temp-horde-gen',
       original: sanitised,
       chatId: opts.chat._id,

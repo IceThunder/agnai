@@ -1,8 +1,9 @@
 import { v4 } from 'uuid'
 import { db } from './client'
 import { AppSchema } from '../../common/types/schema'
-import { encryptText, now } from './util'
+import { decryptText, encryptText, now } from './util'
 import { StatusError } from '../api/wrap'
+import { BUILTIN_FORMATS } from '/common/presets/templates'
 
 export async function createTemplate(
   userId: string,
@@ -57,19 +58,30 @@ export async function updateGenPreset(chatId: string, preset: string) {
 
 export async function createUserPreset(userId: string, settings: AppSchema.GenSettings) {
   const preset: AppSchema.UserGenPreset = {
-    _id: v4(),
     kind: 'gen-setting',
-    userId,
     ...settings,
+    userId,
+    _id: v4(),
   }
 
+  if (preset.useAdvancedPrompt) {
+    delete preset.promptOrderFormat
+  } else {
+    preset.modelFormat = preset.promptOrderFormat as any
+  }
+
+  const originalKey = preset.thirdPartyKey!
   if (preset.thirdPartyKey) {
     preset.thirdPartyKey = encryptText(preset.thirdPartyKey)
   }
 
   await db('gen-setting').insertOne(preset)
 
-  preset.thirdPartyKey = ''
+  if (preset.localRequests && originalKey) {
+    preset.thirdPartyKey = originalKey
+  } else {
+    preset.thirdPartyKey = ''
+  }
 
   return preset
 }
@@ -82,16 +94,30 @@ export async function deleteUserPreset(presetId: string) {
 export async function getUserPresets(userId: string) {
   const presets = await db('gen-setting').find({ userId }).toArray()
   return presets.map((pre) => {
-    pre.thirdPartyKey = ''
-    return pre
+    if (pre.localRequests && pre.thirdPartyKey) {
+      pre.thirdPartyKey = decryptText(pre.thirdPartyKey, true)
+    } else {
+      pre.thirdPartyKey = ''
+    }
+    return mergeModelFormats(pre)
   })
+}
+
+export async function deleteUserPresetKey(userId: string, presetId: string) {
+  await db('gen-setting').updateOne({ _id: presetId, userId }, { $set: { thirdPartyKey: '' } })
+  const preset = await getUserPreset(presetId, userId)
+  return preset
 }
 
 export async function updateUserPreset(
   userId: string,
   presetId: string,
-  update: Partial<AppSchema.GenSettings>
+  update: Partial<AppSchema.UserGenPreset>
 ) {
+  if (update.userId) {
+    delete update.userId
+  }
+
   if (update.registered) {
     const prev = await getUserPreset(presetId)
     update.registered = {
@@ -111,7 +137,11 @@ export async function updateUserPreset(
   const updated = await db('gen-setting').findOne({ _id: presetId })
 
   if (updated) {
-    updated.thirdPartyKey = ''
+    if (updated.localRequests && updated.thirdPartyKey) {
+      updated.thirdPartyKey = decryptText(updated.thirdPartyKey, true)
+    } else {
+      updated.thirdPartyKey = ''
+    }
   }
 
   return updated
@@ -124,12 +154,25 @@ export async function updateUserPreset(
  * @param presetId
  * @returns
  */
-export async function getUserPreset(presetId: string) {
+export async function getUserPreset(presetId: string, userId?: string) {
   const preset = await db('gen-setting').findOne({ _id: presetId })
-  return preset
+  if (preset?.localRequests && preset.thirdPartyKey && userId === preset.userId) {
+    preset.thirdPartyKey = decryptText(preset.thirdPartyKey)
+  }
+  return mergeModelFormats(preset)
 }
 
-export function safePreset(preset: AppSchema.UserGenPreset) {
-  preset.thirdPartyKey = ''
-  return preset
+function mergeModelFormats(gen: AppSchema.UserGenPreset | null) {
+  if (!gen) return gen
+
+  if (gen.useAdvancedPrompt) {
+    gen.modelFormat = gen.modelFormat || 'ChatML'
+  } else if (gen.promptOrderFormat && gen.promptOrderFormat in BUILTIN_FORMATS) {
+    gen.modelFormat = gen.promptOrderFormat as any
+  } else {
+    gen.modelFormat = 'ChatML'
+  }
+
+  delete gen.promptOrderFormat
+  return gen
 }

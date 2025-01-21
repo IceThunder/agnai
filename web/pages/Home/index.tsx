@@ -1,7 +1,14 @@
 import './home.scss'
-import { Component, For, Match, Show, Switch, createSignal, onMount } from 'solid-js'
-import { adaptersToOptions, getAssetUrl, setComponentPageTitle } from '../../shared/util'
-import { announceStore, chatStore, settingStore } from '../../store'
+
+import { Component, For, Match, Show, Switch, createMemo, createSignal, onMount } from 'solid-js'
+import {
+  ComponentEmitter,
+  createEmitter,
+  getAssetUrl,
+  setComponentPageTitle,
+  uniqueBy,
+} from '../../shared/util'
+import { announceStore, chatStore, settingStore, userStore } from '../../store'
 import { A, useNavigate } from '@solidjs/router'
 import { AlertTriangle, MoveRight, Plus, Settings } from 'lucide-solid'
 import { Card, Pill, SolidCard, TitleCard } from '/web/shared/Card'
@@ -12,6 +19,9 @@ import { AppSchema } from '/common/types'
 import { markdown } from '/web/shared/markdown'
 import WizardIcon from '/web/icons/WizardIcon'
 import Slot from '/web/shared/Slot'
+import { adaptersToOptions } from '/common/adapters'
+import { useRef } from '/web/shared/hooks'
+import { canStartTour, startTour } from '/web/tours'
 
 const enum Sub {
   None,
@@ -21,22 +31,39 @@ const enum Sub {
 }
 
 const HomePage: Component = () => {
-  let ref: any
+  const [ref, onRef] = useRef()
   setComponentPageTitle('Information')
   const [sub, setSub] = createSignal(Sub.None)
 
   const closeSub = () => setSub(Sub.None)
 
+  const user = userStore()
+  const announce = announceStore()
   const cfg = settingStore((cfg) => ({
+    initLoading: cfg.initLoading,
     adapters: adaptersToOptions(cfg.config.adapters),
     guest: cfg.guestAccessAllowed,
     config: cfg.config,
   }))
 
-  const announce = announceStore()
+  const announcements = createMemo(() => {
+    return announce.list.filter((ann) => {
+      if (ann.location && ann.location !== 'home') return false
+      const level = ann.userLevel ?? -1
+      return user.userLevel >= level
+    })
+  })
+
+  const emitter = createEmitter('loaded')
 
   onMount(() => {
     announceStore.getAll()
+
+    emitter.on('loaded', () => {
+      if (!canStartTour('home')) return
+      settingStore.menu(true)
+      startTour('home')
+    })
   })
 
   return (
@@ -49,7 +76,7 @@ const HomePage: Component = () => {
         </div>
       </Show>
 
-      <div class="flex flex-col gap-4 text-lg">
+      <div class="mx-2 flex flex-col gap-4 text-lg sm:mx-3">
         <div
           class="hidden justify-center text-6xl sm:flex"
           role="heading"
@@ -61,8 +88,8 @@ const HomePage: Component = () => {
           </span>
         </div>
 
-        <div class="w-full" ref={ref}>
-          <Slot slot="leaderboard" parent={ref} />
+        <div class="w-full" ref={onRef}>
+          <Slot slot="leaderboard" parent={ref()} />
         </div>
 
         <Show when={cfg.config.patreon}>
@@ -77,18 +104,18 @@ const HomePage: Component = () => {
           </TitleCard>
         </Show>
 
-        <RecentChats />
+        <RecentChats emitter={emitter} />
 
-        <Show when={announce.list.length > 0}>
-          <Announcements list={announce.list} />
+        <Show when={announcements().length > 0}>
+          <Announcements list={announcements().slice(0, 1)} />
         </Show>
 
         <div class="home-cards">
           <TitleCard type="bg" title="Guides" class="" center ariaRole="region" ariaLabel="Guides">
             <div class="flex flex-wrap justify-center gap-2">
-              <a>
-                <Pill inverse onClick={() => setSub(Sub.OpenAI)} ariaRole="link">
-                  OpenAI
+              <a href="https://agnai.guide" target="_blank">
+                <Pill type="hl" inverse ariaRole="link" class="cursor-pointer">
+                  Official Guides
                 </Pill>
               </a>
               <A href="/guides/novel">
@@ -118,7 +145,15 @@ const HomePage: Component = () => {
           </TitleCard>
         </div>
 
-        <Show when={announce.list.length === 0}>
+        <div ref={onRef} class="my-1 flex w-full justify-center">
+          <Slot slot="content" parent={ref()} />
+        </div>
+
+        <Show when={announcements().length > 1}>
+          <Announcements list={announcements().slice(1, 4)} />
+        </Show>
+
+        <Show when={announcements().length === 0}>
           <Features />
         </Show>
 
@@ -128,11 +163,15 @@ const HomePage: Component = () => {
           </div>
           <div class="flex flex-col items-center gap-2 leading-6">
             <p>
-              Already have OpenAI, NovelAI, GooseAI, Scale, Claude? Head to the{' '}
-              <A class="link" href="/settings?tab=ai">
-                Settings Page
-              </A>{' '}
-              and configure your AI service.
+              Looking for help with getting started? Check out the{' '}
+              <a class="link" href="https://agnai.guide" target="_blank">
+                Official Guide
+              </a>{' '}
+              or head to the{' '}
+              <a class="link" target="_blank" href="https://discord.agnai.chat">
+                Agnaistic Discord
+              </a>
+              .
             </p>
           </div>
         </Card>
@@ -153,16 +192,22 @@ const HomePage: Component = () => {
 
 export default HomePage
 
-const RecentChats: Component = (props) => {
+const RecentChats: Component<{ emitter: ComponentEmitter<'loaded'> }> = (props) => {
   const nav = useNavigate()
-  const state = chatStore((s) => ({
-    chars: s.allChars.list,
-    last: s.allChats
-      .slice()
-      .sort((l, r) => (r.updatedAt > l.updatedAt ? 1 : -1))
-      .slice(0, 4)
-      .map((chat) => ({ chat, char: s.allChars.map[chat.characterId] })),
-  }))
+
+  const state = chatStore((s) => {
+    // We want this to occur after the state has propogated
+    setTimeout(() => props.emitter.emit.loaded(), 200)
+
+    return {
+      chars: s.allChars.list,
+      last: uniqueBy(s.allChats, 'characterId')
+        .slice()
+        .sort((l, r) => (r.updatedAt > l.updatedAt ? 1 : -1))
+        .slice(0, 4)
+        .map((chat) => ({ chat, char: s.allChars.map[chat.characterId] })),
+    }
+  })
 
   return (
     <section class="flex flex-col" aria-labelledby="homeRecConversations">
@@ -170,25 +215,26 @@ const RecentChats: Component = (props) => {
         Recent Conversations
       </div>
       <div
-        class="grid w-full grid-cols-2 gap-2 sm:grid-cols-4"
+        class="grid w-full grid-cols-2 gap-2 sm:grid-cols-4 sm:gap-4"
         classList={{ hidden: state.last.length === 0 }}
       >
         <For each={state.last}>
-          {({ chat, char }) => (
+          {({ chat, char }, index) => (
             <>
               <div
                 role="link"
                 aria-label={`Chat with ${char.name}, ${elapsedSince(chat.updatedAt)} ago ${
                   chat.name
                 }`}
+                classList={{ 'tour-first-chat': index() === 0 }}
                 class="bg-800 hover:bg-700 hidden h-24 w-full cursor-pointer rounded-md border-[1px] border-[var(--bg-700)] transition duration-300 sm:flex"
                 onClick={() => nav(`/chat/${chat._id}`)}
               >
                 <Show when={char?.avatar}>
                   <AvatarIcon
                     noBorder
-                    class="flex items-center justify-center"
-                    format={{ corners: 'md', size: '3xl' }}
+                    class="flex items-center justify-start"
+                    format={{ corners: 'md', size: 'max3xl' }}
                     avatarUrl={getAssetUrl(char?.avatar || '')}
                   />
                 </Show>
@@ -224,6 +270,7 @@ const RecentChats: Component = (props) => {
                 aria-label={`Chat with ${char.name}, ${elapsedSince(chat.updatedAt)} ago ${
                   chat.name
                 }`}
+                classList={{ 'tour-first-chat-mobile': index() === 0 }}
                 class="bg-800 hover:bg-700 flex w-full cursor-pointer flex-col rounded-md border-[1px] border-[var(--bg-700)] transition duration-300 sm:hidden"
                 onClick={() => nav(`/chat/${chat._id}`)}
               >
@@ -298,20 +345,12 @@ const BorderCard: Component<{ children: any; href: string; ariaLabel?: string }>
 }
 
 const Announcements: Component<{ list: AppSchema.Announcement[] }> = (props) => {
-  let ref: any
   return (
     <>
-      <section class="flex flex-col gap-2" aria-labelledby="homeAnnouncements">
-        <div
-          id="homeAnnouncements"
-          class="flex items-end font-bold leading-[14px]"
-          aria-hidden="true"
-        >
-          Announcements
-        </div>
+      <section class="flex flex-col gap-4" aria-labelledby="homeAnnouncements">
         <For each={props.list}>
           {(item, i) => (
-            <div class="rounded-md border-[1px] border-[var(--hl-500)]">
+            <div class="rounded-md border-[1px] border-[var(--hl-700)]">
               <div class="flex flex-col rounded-t-md bg-[var(--hl-800)] p-2">
                 <div class="text-lg font-bold" role="heading">
                   {item.title}
@@ -325,9 +364,6 @@ const Announcements: Component<{ list: AppSchema.Announcement[] }> = (props) => 
             </div>
           )}
         </For>
-        <div ref={ref} class="my-1 w-full">
-          <Slot slot="content" parent={ref} />
-        </div>
       </section>
     </>
   )

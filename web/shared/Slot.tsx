@@ -6,6 +6,7 @@ import {
   createEffect,
   createMemo,
   createSignal,
+  on,
   onCleanup,
 } from 'solid-js'
 import { SettingState, settingStore, userStore } from '../store'
@@ -13,8 +14,12 @@ import { getPagePlatform, getWidthPlatform, useEffect, useResizeObserver } from 
 import { getUserSubscriptionTier, wait } from '/common/util'
 import { createDebounce } from './util'
 
+const win: any = window
+win.enableSticky = JSON.parse(localStorage.getItem('agnai-sticky') || 'true')
+
 window.googletag = window.googletag || { cmd: [] }
 window.ezstandalone = window.ezstandalone || { cmd: [] }
+window.fusetag = window.fusetag || { que: [] }
 
 let slotCounter = 200
 
@@ -22,18 +27,29 @@ const idLocks = new Set<number>()
 
 declare const google: { ima: any }
 
-export type SlotKind = 'menu' | 'leaderboard' | 'content' | 'video' | 'pane_leaderboard'
 export type SlotSize = 'sm' | 'lg' | 'xl'
+export type SlotKind =
+  | 'menu'
+  | 'leaderboard'
+  | 'content'
+  | 'video'
+  | 'pane_leaderboard'
+  | 'header'
+  | 'rail_lhs'
+  | 'rail_rhs'
 
 type SlotId =
+  | 'agn-header'
   | 'agn-menu-sm'
   | 'agn-menu-lg'
+  | 'agn-rail-lhs'
+  | 'agn-rail-rhs'
   | 'agn-leaderboard-sm'
   | 'agn-leaderboard-lg'
   | 'agn-leaderboard-xl'
   | 'agn-video-sm'
 
-type SlotSpec = { size: string; id: SlotId; fallbacks?: string[] }
+type SlotSpec = { size: string; id: SlotId; fallbacks?: string[]; fuseId: string }
 type SlotDef = {
   calc?: (parent: HTMLElement) => SlotSize | null
   platform: 'page' | 'container'
@@ -47,21 +63,45 @@ type SlotDef = {
 const MIN_AGE = 60 * 1000
 const VIDEO_AGE = 125 * 1000
 
+const FuseIds = new Map<string, boolean>()
+
+export function useCanSlot() {
+  const cfg = settingStore((s) => {
+    const parsed = tryParse<Partial<SettingState['slots']>>(s.config.serverConfig?.slots || '{}')
+    return {
+      ready: !s.slots.provider && s.slotsLoaded && s.initLoading === false,
+      provider: s.slots.provider,
+      publisherId: parsed.publisherId || s.slots.publisherId,
+    }
+  })
+
+  const user = userStore((s) => ({
+    sub: s.sub,
+  }))
+
+  const canSlot = createMemo(() => {
+    if (cfg.provider === 'google' && !cfg.publisherId) return false
+    return !!cfg.provider && !!cfg.ready && !user.sub?.tier.disableSlots
+  })
+
+  return canSlot
+}
+
 const Slot: Component<{
   slot: SlotKind
   sticky?: boolean | 'always'
-  parent: HTMLElement
+  parent: HTMLElement | undefined
   size?: SlotSize
 }> = (props) => {
   let ref: HTMLDivElement | undefined = undefined
   const cfg = settingStore((s) => {
     const parsed = tryParse<Partial<SettingState['slots']>>(s.config.serverConfig?.slots || '{}')
     const config = {
-      provider: parsed.provider || s.slots.provider,
+      provider: s.slots.provider,
       publisherId: parsed.publisherId || s.slots.publisherId,
-      slots: Object.assign(s.slots, parsed) as SettingState['slots'],
+      slots: Object.assign({}, s.slots) as SettingState['slots'],
       flags: s.flags,
-      ready: s.slotsLoaded && s.initLoading === false,
+      ready: !!s.slots.provider && s.slotsLoaded && s.initLoading === false,
       config: s.config.serverConfig,
     }
     return config
@@ -82,39 +122,70 @@ const Slot: Component<{
   const [slotId, setSlotId] = createSignal<string>()
   const [actualId, setActualId] = createSignal('...')
 
-  const tier = createMemo(() => {
+  createEffect(() => {
     if (!user.user) return
-    return getUserSubscriptionTier(user.user, user.tiers)
+    const subtier = getUserSubscriptionTier(user.user, user.tiers)
+
+    if (subtier?.tier.disableSlots) {
+      win.enableSticky = undefined
+      localStorage.setItem('agnai-sticky', 'false')
+    }
+
+    return subtier
   })
 
   const id = createMemo(() => {
     if (cfg.provider === 'ez') return `ezoic-pub-ad-placeholder-${uniqueId() || '###'}`
+    if (cfg.provider === 'fuse') return `fuse-${uniqueId()}`
     return `${props.slot}-${uniqueId()}`
   })
 
   const log = (...args: any[]) => {
-    if (!cfg.publisherId) return
+    if (cfg.provider === 'google' && !cfg.publisherId) {
+      return
+    }
     if (!cfg.flags.reporting) return
     let slotid = actualId()
     const now = new Date()
     const ts = `${now.toTimeString().slice(0, 8)}.${now.toISOString().slice(-4, -1)}`
-    console.log.apply(null, [`${ts} [${uniqueId()}]`, ...args, `| ${slotid}`])
+    console.log.apply(null, [
+      `${ts} [${cfg.provider || 'none'}|${uniqueId() || 'no id'}]`,
+      ...args,
+      `| ${slotid}`,
+    ])
   }
 
   const resize = useResizeObserver()
   const parentSize = useResizeObserver()
+
+  createEffect(
+    on(
+      () => props.parent,
+      (parent) => {
+        if (parent && !parentSize.loaded()) {
+          parentSize.load(parent)
+        }
+      }
+    )
+  )
 
   if (props.parent && !parentSize.loaded()) {
     parentSize.load(props.parent)
   }
 
   const specs = createMemo(() => {
-    if (!cfg.ready) return null
+    const parent = props.parent
+    const ready = cfg.ready
+    if (!ready) return null
+
+    if (!parent) {
+      return
+    }
 
     resize.size()
     props.parent?.clientWidth
     parentSize.size()
-    const spec = getSpec(props.slot, props.parent, log)
+    const spec = getSpec(props.slot, parent, log)
     if (!spec) return null
 
     setActualId(spec.id)
@@ -178,7 +249,9 @@ const Slot: Component<{
       if (evt.slot.getSlotElementId() !== id()) return
     }
 
-    gtmReady.then(() => {
+    gtmReady.then((status) => {
+      if (!status) return
+
       googletag.cmd.push(() => {
         googletag.pubads().addEventListener('impressionViewable', onView)
         googletag.pubads().addEventListener('slotVisibilityChanged', onVisChange)
@@ -191,7 +264,8 @@ const Slot: Component<{
     return () => {
       clearInterval(refresher)
 
-      gtmReady.then(() => {
+      gtmReady.then((status) => {
+        if (!status) return
         googletag.pubads().removeEventListener('impressionViewable', onView)
         googletag.pubads().removeEventListener('slotVisibilityChanged', onVisChange)
         googletag.pubads().removeEventListener('slotOnload', onLoaded)
@@ -203,6 +277,7 @@ const Slot: Component<{
 
   onCleanup(() => {
     idLocks.delete(uniqueId()!)
+    FuseIds.delete(id())
     log('Cleanup')
 
     if (cfg.provider === 'ez') {
@@ -226,11 +301,16 @@ const Slot: Component<{
       return
     }
 
-    if (!cfg.publisherId) {
+    if (!props.parent) {
+      log('Not ready: Parent missing')
+      return
+    }
+
+    if (cfg.provider === 'google' && !cfg.publisherId) {
       return log('No publisher id')
     }
 
-    if (user.sub?.tier?.disableSlots) {
+    if (user.sub?.tier.disableSlots) {
       props.parent.style.display = 'hidden'
       return log('Slots are tier disabled')
     }
@@ -261,9 +341,11 @@ const Slot: Component<{
     setUniqueId(num)
 
     if (cfg.provider === 'ez') {
-      invoke(log, num)
+      invokeEz(log, num)
     } else if (cfg.provider === 'google') {
-      gtmReady.then(() => {
+      gtmReady.then((status) => {
+        if (!status) return
+
         googletag.cmd.push(function () {
           const slotId = getSlotId(`/${cfg.publisherId}/${spec.id}`)
           setSlotId(slotId)
@@ -288,6 +370,14 @@ const Slot: Component<{
             googletag.pubads().refresh([adslot()!])
           }
         })
+      })
+    } else if (cfg.provider === 'fuse') {
+      fuseReady.then((status) => {
+        if (!status) return
+
+        window.fusetag.registerZone(id())
+        FuseIds.set(id(), false)
+        invokeFuse()
       })
     }
 
@@ -317,15 +407,7 @@ const Slot: Component<{
   return (
     <>
       <Switch>
-        <Match
-          when={
-            !cfg.ready ||
-            !user.user ||
-            !specs() ||
-            tier()?.tier.disableSlots ||
-            user.sub?.tier?.disableSlots
-          }
-        >
+        <Match when={!cfg.ready || !user.user || !specs() || user.sub?.tier?.disableSlots}>
           {null}
         </Match>
         <Match when={specs()!.video && cfg.slots.gtmVideoTag}>
@@ -337,6 +419,7 @@ const Slot: Component<{
               position: 'relative',
             }}
             data-slot={specs()!.id}
+            data-fuse={specs()!.fuseId}
           >
             <video
               id={`${id()}-player`}
@@ -359,6 +442,7 @@ const Slot: Component<{
             ref={ref}
             id={id()}
             data-slot={specs()!.id}
+            data-fuse={specs()!.fuseId}
             style={{ ...style(), ...specs()!.css }}
           ></div>
         </Match>
@@ -368,6 +452,7 @@ const Slot: Component<{
             ref={ref}
             id={id()}
             data-slot={specs()!.id}
+            data-fuse={specs()!.fuseId}
             style={{ ...style(), ...specs()!.css }}
           ></div>
         </Match>
@@ -386,39 +471,78 @@ const slotDefs: Record<SlotKind, SlotDef> = {
       return def
     },
     video: true,
-    sm: { size: '300x250', id: 'agn-menu-sm' },
-    lg: { size: '300x300', id: 'agn-video-sm' },
-    xl: { size: '300x600', id: 'agn-video-sm' },
+    sm: { size: '300x250', id: 'agn-menu-sm', fuseId: '' },
+    lg: { size: '300x300', id: 'agn-video-sm', fuseId: '' },
+    xl: { size: '300x600', id: 'agn-video-sm', fuseId: '' },
     ez: [],
   },
   leaderboard: {
     platform: 'container',
-    sm: { size: '320x50', id: 'agn-leaderboard-sm' },
-    lg: { size: '728x90', id: 'agn-leaderboard-lg' },
-    xl: { size: '970x90', id: 'agn-leaderboard-xl' },
+    sm: { size: '320x50', id: 'agn-leaderboard-sm', fuseId: '23194815330' },
+    lg: { size: '728x90', id: 'agn-leaderboard-lg', fuseId: '23194815330' },
+    xl: { size: '970x90', id: 'agn-leaderboard-xl', fuseId: '23194815330' },
     ez: [110, 111],
   },
   menu: {
     calc: (parent) => {
-      if (window.innerHeight > 1010) return 'lg'
+      if (window.innerHeight >= 1280) return 'lg'
       return 'sm'
     },
     platform: 'page',
-    sm: { size: '300x250', id: 'agn-menu-sm' },
-    lg: { size: '300x600', id: 'agn-menu-lg' },
+    sm: {
+      size: '300x250',
+      id: 'agn-menu-sm',
+      fuseId: location.host === 'agnai.chat' ? '23195824742' : '23199579880', // 23199579880
+    }, //
+    lg: {
+      size: '300x600',
+      id: 'agn-menu-lg',
+      fuseId: location.host === 'agnai.chat' ? '23195824742' : '23195824742',
+    },
     ez: [106],
   },
   content: {
     platform: 'container',
-    sm: { size: '320x50', id: 'agn-leaderboard-sm' },
-    lg: { size: '728x90', id: 'agn-leaderboard-lg' },
-    xl: { size: '970x90', id: 'agn-leaderboard-xl', fallbacks: ['970x66', '960x90', '950x90'] },
+    sm: { size: '320x50', id: 'agn-leaderboard-sm', fuseId: '23195816384' },
+    lg: { size: '728x90', id: 'agn-leaderboard-lg', fuseId: '23195816384' },
+    xl: {
+      size: '970x90',
+      id: 'agn-leaderboard-xl',
+      fuseId: '',
+      fallbacks: ['970x66', '960x90', '950x90'],
+    },
     ez: [112, 113, 114],
   },
   pane_leaderboard: {
     platform: 'container',
-    sm: { size: '320x50', id: 'agn-leaderboard-sm' },
+    sm: { size: '320x50', id: 'agn-leaderboard-sm', fuseId: '' },
     ez: [108, 109],
+  },
+  header: {
+    platform: 'page',
+    video: false,
+    sm: { size: '320x250', id: 'agn-header', fuseId: '23194815330' },
+    ez: [],
+  },
+  rail_lhs: {
+    calc: (parent) => {
+      if (window.innerHeight >= 1280) return 'lg'
+      return 'sm'
+    },
+    platform: 'page',
+    sm: { size: '300x250', id: 'agn-rail-lhs', fuseId: '23194836720' },
+    lg: { size: '300x600', id: 'agn-rail-lhs', fuseId: '23194836720' },
+    ez: [],
+  },
+  rail_rhs: {
+    calc: (parent) => {
+      if (window.innerHeight > 1280) return 'lg'
+      return 'sm'
+    },
+    platform: 'page',
+    sm: { size: '300x250', id: 'agn-rail-rhs', fuseId: '23195816390' },
+    lg: { size: '300x600', id: 'agn-rail-rhs', fuseId: '23195816390' },
+    ez: [],
   },
 }
 
@@ -433,7 +557,6 @@ function toPixels(size: string) {
   return {}
 }
 
-const win: any = window
 win.getSlotById = getSlotById
 
 export function getSlotById(id: string) {
@@ -448,6 +571,10 @@ export function getSlotById(id: string) {
 function getUniqueId(kind: SlotKind, config: SettingState['slots'], current?: number) {
   if (current) return current
   if (config.provider === 'google') {
+    return ++slotCounter
+  }
+
+  if (config.provider === 'fuse') {
     return ++slotCounter
   }
 
@@ -473,20 +600,38 @@ function getSlotId(id: string) {
   return id
 }
 
-const gtmReady = new Promise(async (resolve) => {
+const STARTED = Date.now()
+
+const gtmReady = new Promise(async (resolve, reject) => {
   do {
     if (typeof googletag.pubads === 'function') {
       return resolve(true)
     }
+
+    if (Date.now() - STARTED > 10000) return resolve(false)
     await wait(0.05)
   } while (true)
 })
 
-const ezReady = new Promise(async (resolve) => {
+const ezReady = new Promise(async (resolve, reject) => {
   do {
     if (typeof window.ezstandalone.enable !== 'function') {
       return resolve(true)
     }
+    if (Date.now() - STARTED > 10000) return resolve(false)
+    await wait(0.05)
+  } while (true)
+})
+
+const fuseReady = new Promise(async (resolve, reject) => {
+  do {
+    if (typeof window.fusetag.pageInit === 'function') {
+      console.log('[fuse] ready')
+      return resolve(true)
+    }
+
+    if (Date.now() - STARTED > 10000) return resolve(false)
+
     await wait(0.05)
   } while (true)
 })
@@ -557,8 +702,10 @@ function getSizes(...specs: Array<SlotSpec | undefined>) {
   return sizes
 }
 
-const [invoke] = createDebounce((log: (typeof console)['log'], self: number) => {
-  ezReady.then(() => {
+const [invokeEz] = createDebounce((log: (typeof console)['log'], self: number) => {
+  ezReady.then((status) => {
+    if (!status) return
+
     ezstandalone.cmd.push(() => {
       const current = ezstandalone.getSelectedPlaceholders()
       const adding = new Set<number>([self])
@@ -579,6 +726,25 @@ const [invoke] = createDebounce((log: (typeof console)['log'], self: number) => 
         log('[ez]', `dispatched #${add.join(', ')} (more)`)
         ezstandalone.displayMore(...add)
       }
+    })
+  })
+}, 1000)
+
+const [invokeFuse] = createDebounce(() => {
+  fuseReady.then((status) => {
+    if (!status) return
+    const ids: string[] = []
+    for (const [id, inited] of FuseIds.entries()) {
+      if (inited) continue
+      ids.push(id)
+      FuseIds.set(id, true)
+    }
+    console.log(`[fuse] init ${ids}`)
+    const win: any = window
+    win.enableSticky = true
+    localStorage.setItem('agnai-sticky', 'true')
+    window.fusetag.que.push(() => {
+      window.fusetag.pageInit({ blockingFuseIds: ids })
     })
   })
 }, 1000)

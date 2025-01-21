@@ -10,7 +10,7 @@ import { usersApi } from './data/user'
 import { publish, subscribe } from './socket'
 import { toastStore } from './toasts'
 import { UI } from '/common/types'
-import { defaultUIsettings } from '/common/types/ui'
+import { UISettings, defaultUIsettings } from '/common/types/ui'
 import type { FindUserResponse } from '/common/horde-gen'
 import { AIAdapter } from '/common/adapters'
 import { getUserSubscriptionTier } from '/common/util'
@@ -21,6 +21,8 @@ import {
   hexToRgb,
   setRootVariable,
 } from '../shared/colors'
+import { UserType } from '/common/types/admin'
+import { embedApi } from './embeddings'
 
 const BACKGROUND_KEY = 'ui-bg'
 export const ACCOUNT_KEY = 'agnai-username'
@@ -36,10 +38,18 @@ const [debouceUI] = createDebounce((update: UI.UISettings) => {
   updateTheme(update)
 }, 50)
 
+type SubscriberInfo = {
+  level: number
+  type: AppSchema.SubscriptionType
+  tier: AppSchema.SubscriptionTier
+}
+
 export type UserState = {
   loading: boolean
   error?: string
   loggedIn: boolean
+  userType: UserType | undefined
+  userLevel: number
   jwt: string
   profile?: AppSchema.Profile
   user?: AppSchema.User
@@ -55,6 +65,7 @@ export type UserState = {
   showProfile: boolean
   tiers: AppSchema.SubscriptionTier[]
   billingLoading: boolean
+  subLoading: boolean
   subStatus?: {
     status: 'active' | 'cancelling' | 'cancelled' | 'new'
     tierId: string
@@ -67,12 +78,11 @@ export type UserState = {
       activeAt: string
     }
   }
-  sub?: {
-    level: number
-    type: AppSchema.SubscriptionType
-    tier: AppSchema.SubscriptionTier
-  }
+
+  sub?: SubscriberInfo
 }
+
+const CACHED_SUB_KEY = 'cached-sub'
 
 export const userStore = createStore<UserState>(
   'user',
@@ -83,14 +93,15 @@ export const userStore = createStore<UserState>(
   })
 
   events.on(EVENTS.init, (init) => {
-    userStore.setState({ user: init.user, profile: init.profile })
+    userStore.setState({ user: init.user, profile: init.profile, userType: getUserType(init.user) })
 
-    if (init.user?.patreonUserId) {
-      userStore.syncPatreonAccount(true)
-    }
-
-    if (init.user.billing) {
-      userStore.validateSubscription(true)
+    if (
+      init.user?.patreonUserId ||
+      init.user?.billing ||
+      init.user?.manualSub ||
+      init.user?.stripeSessions?.length
+    ) {
+      userStore.retrieveSubscription(true)
     }
 
     if (init.user?._id !== 'anon') {
@@ -102,7 +113,7 @@ export const userStore = createStore<UserState>(
     /**
      * While introducing persisted UI settings, we'll automatically persist settings that the user has in local storage
      */
-    if (!init.user.ui) {
+    if (!init.user || !init.user.ui) {
       userStore.saveUI(defaultUIsettings)
     } else {
       userStore.receiveUI(init.user.ui)
@@ -144,11 +155,82 @@ export const userStore = createStore<UserState>(
       }
     },
 
+    async removeProfileAvatar() {
+      const res = await usersApi.removeProfileAvatar()
+      if (res.error) return toastStore.error(`Could not update profile: ${res.error}`)
+      if (res.result) {
+        return { profile: res.result }
+      }
+    },
+
     async getTiers({ user }) {
       const res = await api.get('/admin/tiers')
       if (res.result) {
         const sub = user ? getUserSubscriptionTier(user, res.result.tiers) : undefined
         return { tiers: res.result.tiers, sub }
+      }
+    },
+
+    async *unlinkGoogleAccount(_, success?: () => void) {
+      const res = await api.post('/user/unlink-google')
+      if (res.result) {
+        yield { user: res.result.user }
+        toastStore.success('Google Account unlinked')
+        return
+      }
+
+      toastStore.error(`Could not unlinked Google: ${res.error}`)
+    },
+
+    async *handleGoogleCallback(
+      _,
+      action: 'login' | 'link',
+      data: { credential: string },
+      success?: () => void
+    ) {
+      if (action !== 'login' && !isLoggedIn()) {
+        toastStore.error(`Cannot link account: Not signed in`)
+        return
+      }
+      yield { loading: true }
+
+      const res = await api.post(action === 'link' ? '/user/link-google' : '/user/login/google', {
+        token: data.credential,
+      })
+
+      yield { loading: false }
+
+      switch (action) {
+        case 'link': {
+          if (res.result) {
+            toastStore.success('Successfully linked Google account')
+            yield { user: res.result.user }
+            success?.()
+            return
+          }
+
+          toastStore.error(`Could not link account: ${res.error}`)
+          return
+        }
+
+        case 'login': {
+          if (res.result) {
+            yield {
+              loggedIn: true,
+              user: res.result.user,
+              profile: res.result.profile,
+              jwt: res.result.token,
+              userType: getUserType(res.result.user),
+            }
+            setAuth(res.result.token)
+            success?.()
+            publish({ type: 'login', token: res.result.token })
+            events.emit(EVENTS.loggedIn)
+            return
+          }
+
+          toastStore.error(`Could not sign in: ${res.error}`)
+        }
       }
     },
 
@@ -176,10 +258,11 @@ export const userStore = createStore<UserState>(
       yield { billingLoading: true }
       const res = await api.post(`/admin/billing/subscribe/finish`, { sessionId, state })
       yield { billingLoading: false }
+
       if (res.result && state === 'success') {
         onSuccess?.()
         return {
-          user: { ...user!, sub: res.result },
+          user: { ...user!, sub: res.result, userLevel: res.result?.level ?? 0 },
         }
       }
 
@@ -233,15 +316,42 @@ export const userStore = createStore<UserState>(
       }
     },
 
-    async *validateSubscription({ billingLoading, tiers, sub: previous }, quiet?: boolean) {
-      if (billingLoading) return
-      yield { billingLoading: true }
+    async *retrieveSubscription({ subLoading, tiers, sub: previous, user: last }, quiet?: boolean) {
+      if (subLoading) return
+      yield { subLoading: true }
+      const res = await api.post('/admin/billing/subscribe/retrieve')
+      yield { subLoading: false }
+
+      if (res.result) {
+        const next = getUserSubscriptionTier(res.result.user, tiers, previous)
+        res.result.user.hordeKey = last?.hordeKey
+
+        yield {
+          user: res.result.user,
+          sub: next,
+          userLevel: res.result.user.sub?.level ?? next?.level ?? 0,
+        }
+      }
+
+      if (quiet) return
+      if (res.result) {
+        toastStore.success('You are currently subscribed')
+      }
+
+      if (res.error) {
+        toastStore.error(res.error)
+      }
+    },
+
+    async *validateSubscription({ subLoading, tiers, sub: previous }, quiet?: boolean) {
+      if (subLoading) return
+      yield { subLoading: true }
       const res = await api.post('/admin/billing/subscribe/verify')
-      yield { billingLoading: false }
+      yield { subLoading: false }
 
       if (res.result) {
         const next = getUserSubscriptionTier(res.result, tiers, previous)
-        yield { user: res.result, sub: next }
+        yield { user: res.result, sub: next, userLevel: next?.level ?? 0 }
       }
 
       if (quiet) return
@@ -284,22 +394,31 @@ export const userStore = createStore<UserState>(
       }
     },
 
-    async updateConfig(_, config: ConfigUpdate) {
+    async updateConfig({ user: prev }, config: ConfigUpdate) {
       const res = await usersApi.updateConfig(config)
       if (res.error) toastStore.error(`Failed to update config: ${res.error}`)
       if (res.result) {
         window.usePipeline = res.result.useLocalPipeline
+
+        const prevLTM = prev?.disableLTM ?? true
+        if (prevLTM && config.disableLTM === false) {
+          embedApi.initSimiliary()
+        }
+
         toastStore.success(`Updated settings`)
         return { user: res.result }
       }
     },
 
-    async updatePartialConfig(_, config: ConfigUpdate) {
+    async updatePartialConfig(_, config: ConfigUpdate, quiet?: boolean) {
       const res = await usersApi.updatePartialConfig(config)
       if (res.error) toastStore.error(`Failed to update config: ${res.error}`)
       if (res.result) {
         window.usePipeline = res.result.useLocalPipeline
-        toastStore.success(`Updated settings`)
+
+        if (!quiet) {
+          toastStore.success(`Updated settings`)
+        }
         return { user: res.result }
       }
     },
@@ -328,6 +447,17 @@ export const userStore = createStore<UserState>(
     },
 
     async remoteLogin(_, onSuccess: (token: string) => void) {
+      const res = await api.post('/user/login/callback')
+      if (res.result) {
+        onSuccess(res.result.token)
+      }
+
+      if (res.error) {
+        toastStore.error(`Could not authenticate: ${res.error}`)
+      }
+    },
+
+    async thirdPartyLogin(_, onSuccess: (token: string) => void) {
       const res = await api.post('/user/login/callback')
       if (res.result) {
         onSuccess(res.result.token)
@@ -406,6 +536,7 @@ export const userStore = createStore<UserState>(
         user: res.result.user,
         profile: res.result.profile,
         jwt: res.result.token,
+        userType: getUserType(res.result.user),
       }
 
       if (res.result.user.ui) {
@@ -438,14 +569,16 @@ export const userStore = createStore<UserState>(
         jwt: res.result.token,
       }
 
-      toastStore.success('Welcome to Agnaistic')
       onSuccess?.()
       publish({ type: 'login', token: res.result.token })
+      events.emit(EVENTS.loggedIn)
     },
     async *logout() {
       clearAuth()
+      storage.localRemoveItem(CACHED_SUB_KEY)
       publish({ type: 'logout' })
-      const ui = await getUIsettings(true)
+      const ui = getUIsettings(true)
+
       yield {
         jwt: '',
         profile: undefined,
@@ -523,6 +656,13 @@ export const userStore = createStore<UserState>(
 
       const keys = Object.keys(defaultUIsettings.msgOptsInline) as UI.MessageOption[]
 
+      for (const key in defaultUIsettings) {
+        if (key in update === false) {
+          const prop = key as keyof UISettings
+          update[prop] = defaultUIsettings[prop] as never // ...?
+        }
+      }
+
       for (const key of keys) {
         if (!update.msgOptsInline[key]) {
           update.msgOptsInline[key] = { ...defaultUIsettings.msgOptsInline[key] }
@@ -561,6 +701,8 @@ export const userStore = createStore<UserState>(
         | 'third-party'
         | 'elevenlabs'
         | 'mistral'
+        | 'featherless'
+        | 'arli'
     ) {
       const res = await usersApi.deleteApiKey(kind)
       if (res.error) return toastStore.error(`Failed to update settings: ${res.error}`)
@@ -593,6 +735,14 @@ export const userStore = createStore<UserState>(
 
       if (kind === 'mistral') {
         return { user: { ...user, mistralKey: '', mistralKeySet: false } }
+      }
+
+      if (kind === 'featherless') {
+        return { user: { ...user, featherlessApiKey: '', featherlessApiKeySet: false } }
+      }
+
+      if (kind === 'arli') {
+        return { user: { ...user, arliApiKey: '', arliApiKeySet: false } }
       }
     },
 
@@ -666,6 +816,14 @@ export const userStore = createStore<UserState>(
   }
 })
 
+userStore.subscribe((nextState) => {
+  if (!nextState.sub) {
+    return
+  }
+
+  storage.localSetItem(CACHED_SUB_KEY, JSON.stringify(nextState.sub))
+})
+
 function init(): UserState {
   const existing = getAuth()
 
@@ -680,6 +838,8 @@ function init(): UserState {
 
   if (!existing) {
     return {
+      userType: undefined,
+      userLevel: -1,
       loading: false,
       jwt: '',
       loggedIn: false,
@@ -692,10 +852,15 @@ function init(): UserState {
       showProfile: false,
       tiers: [],
       billingLoading: false,
+      subLoading: false,
     }
   }
 
+  const cachedSub = storage.localGetItem(CACHED_SUB_KEY)
+
   return {
+    userType: undefined,
+    userLevel: 0,
     loggedIn: true,
     loading: false,
     jwt: existing,
@@ -708,6 +873,8 @@ function init(): UserState {
     showProfile: false,
     tiers: [],
     billingLoading: false,
+    subLoading: false,
+    sub: cachedSub ? JSON.parse(cachedSub) : undefined,
   }
 }
 
@@ -731,11 +898,23 @@ async function updateTheme(ui: UI.UISettings) {
 
   const gradients = ui.bgCustomGradient ? getColorShades(ui.bgCustomGradient) : []
 
+  const notifies = Object.entries({
+    info: 'sky',
+    success: 'green',
+    warning: 'premium',
+    error: 'red',
+  })
+
   for (let shade = 100; shade <= 1000; shade += 100) {
     const index = shade / 100 - 1
     const num = ui.mode === 'light' ? 1000 - shade : shade
 
     if (shade <= 900) {
+      for (const [notify, source] of notifies) {
+        const color = getRootVariable(`--${source}-${num}`)
+        root.style.setProperty(`--${notify}-${num}`, color)
+      }
+
       const color = getRootVariable(`--${ui.theme}-${num}`)
       const colorRgb = hexToRgb(color)
       root.style.setProperty(`--hl-${shade}`, color)
@@ -857,4 +1036,13 @@ async function checkout(sessionUrl: string) {
       clearInterval(interval)
     }
   }, 3000)
+}
+
+function getUserType(user: AppSchema.User): UserType {
+  if (user.admin) return 'admins'
+  if (user.role === 'admin') return 'admins'
+  if (user.role === 'moderator') return 'moderators'
+  if (user.sub?.level && user.sub.level > 0) return 'subscribers'
+  if (user._id === 'anon') return 'guests'
+  return 'users'
 }

@@ -52,7 +52,7 @@ export function getDefaultUserPreset() {
   return preset
 }
 
-export function getUserPreset(presetId?: string) {
+export function getUserPreset(presetId?: string): Partial<AppSchema.GenSettings> | undefined {
   if (!presetId) return
   if (isDefaultPreset(presetId)) return defaultPresets[presetId]
 
@@ -86,7 +86,7 @@ export function getPresetOptions(
   const user = userStore.getState().user || { defaultPreset: '' }
   const presets = userPresets.slice().map((preset) => ({
     label: `[${getServiceName(preset.service)}] ${preset.name} ${
-      user.defaultPreset === preset._id ? '(*) ' : ''
+      user.defaultPreset === preset._id ? '★' : ''
     }`,
     value: preset._id,
     custom: true,

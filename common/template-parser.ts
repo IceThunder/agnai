@@ -6,82 +6,15 @@ import peggy from 'peggy'
 import { elapsedSince } from './util'
 import { v4 } from 'uuid'
 
-const parser = loadParser()
-
-function loadParser() {
-  try {
-    const parser = peggy.generate(grammar.trim(), {
-      error: (stage, msg, loc) => {
-        console.error({ loc, stage }, msg)
-      },
-    })
-    return parser
-  } catch (ex) {
-    console.error(ex)
-    throw ex
-  }
-}
-
-type PNode = PlaceHolder | ConditionNode | IteratorNode | InsertNode | LowPriorityNode | string
-
-type PlaceHolder = { kind: 'placeholder'; value: Holder; values?: any; pipes?: string[] }
-type ConditionNode = { kind: 'if'; value: Holder; values?: any; children: PNode[] }
-type IteratorNode = { kind: 'each'; value: IterableHolder; children: CNode[] }
-type InsertNode = { kind: 'history-insert'; values: number; children: PNode[] }
-type LowPriorityNode = { kind: 'lowpriority'; children: PNode[] }
-
-type CNode =
-  | Exclude<PNode, { kind: 'each' }>
-  | { kind: 'bot-prop'; prop: BotsProp }
-  | { kind: 'history-prop'; prop: HistoryProp }
-  | { kind: 'chat-embed-prop'; prop: ChatEmbedProp }
-  | { kind: 'history-if'; prop: HistoryProp; children: CNode[] }
-  | { kind: 'bot-if'; prop: BotsProp; children: CNode[] }
-
-type Holder =
-  | 'char'
-  | 'user'
-  | 'scenario'
-  | 'personality'
-  | 'example_dialogue'
-  | 'history'
-  | 'ujb'
-  | 'post'
-  | 'memory'
-  | 'chat_age'
-  | 'idle_duration'
-  | 'all_personalities'
-  | 'chat_embed'
-  | 'user_embed'
-  | 'impersonating'
-  | 'system_prompt'
-  | 'random'
-  | 'roll'
-
-type RepeatableHolder = Extract<
-  Holder,
-  'char' | 'user' | 'chat_age' | 'roll' | 'random' | 'idle_duration'
->
-
-const repeatableHolders = new Set<RepeatableHolder>([
-  'char',
-  'user',
-  'chat_age',
-  'idle_duration',
-  'random',
-  'roll',
-])
-
-type IterableHolder = 'history' | 'bots' | 'chat_embed'
-
-type ChatEmbedProp = 'i' | 'name' | 'text'
-type HistoryProp = 'i' | 'message' | 'dialogue' | 'name' | 'isuser' | 'isbot'
-type BotsProp = 'i' | 'personality' | 'name'
+type Section = 'system' | 'history' | 'post'
 
 export type TemplateOpts = {
   continue?: boolean
   parts?: Partial<PromptParts>
   chat: AppSchema.Chat
+
+  isPart?: boolean
+  isFinal?: boolean
 
   char: AppSchema.Character
   replyAs?: AppSchema.Character
@@ -102,13 +35,133 @@ export type TemplateOpts = {
     output?: Record<string, { src: string; lines: string[] }>
   }
 
+  sections?: {
+    flags: { [key in Section]?: boolean }
+    sections: { [key in Section]: string[] }
+    done: boolean
+  }
+
   /**
    * Only allow repeatable placeholders. Excludes iterators, conditions, and prompt parts.
    */
   repeatable?: boolean
   inserts?: Map<number, string>
   lowpriority?: Array<{ id: string; content: string }>
+
+  jsonValues: Record<string, any> | undefined
 }
+
+const parser = loadParser()
+
+function loadParser() {
+  try {
+    const parser = peggy.generate(grammar.trim(), {
+      error: (stage, msg, loc) => {
+        console.error({ loc, stage }, msg)
+      },
+    })
+    return parser
+  } catch (ex) {
+    console.error(ex)
+    throw ex
+  }
+}
+
+const HISTORY_MARKER = '__history__marker__'
+
+type PNode = PlaceHolder | ConditionNode | IteratorNode | InsertNode | LowPriorityNode | string
+
+type PlaceHolder = {
+  kind: 'placeholder'
+  values?: any
+  pipes?: string[]
+} & HolderDefinition
+type ConditionNode = {
+  kind: 'if'
+  value: Holder
+  values?: any
+  children: Array<PNode | ElseNode>
+}
+type ElseNode = { kind: 'else'; children: PNode[] }
+type IteratorNode = { kind: 'each'; value: IterableHolder; children: CNode[] }
+type InsertNode = { kind: 'history-insert'; values: number; children: PNode[] }
+type LowPriorityNode = { kind: 'lowpriority'; children: PNode[] }
+
+type CNode =
+  | Exclude<PNode, { kind: 'each' }>
+  | { kind: 'bot-prop'; prop: BotsProp }
+  | { kind: 'history-prop'; prop: HistoryProp }
+  | { kind: 'chat-embed-prop'; prop: ChatEmbedProp }
+  | { kind: 'history-if'; prop: HistoryProp; children: CNode[] }
+  | { kind: 'bot-if'; prop: BotsProp; children: CNode[] }
+
+type DiceExpr = { values: string; amt?: number; adjust?: number; keep?: number }
+
+type HolderDefinition =
+  | {
+      value: 'roll'
+      amt?: number
+      keep?: number
+      adjust?: number
+      extra?: Array<DiceExpr>
+    }
+  | { value: Holder }
+
+const SAFE_PART_HOLDERS: { [key in Holder | 'roll']?: boolean } = {
+  char: true,
+  user: true,
+  chat_age: true,
+  value: true,
+  idle_duration: true,
+  random: true,
+  roll: true,
+}
+
+const FINAL_IGNORE_HOLDERS: { [key in Holder | 'roll']?: boolean } = {
+  system_prompt: true,
+  ujb: true,
+}
+
+type Holder =
+  | 'char'
+  | 'user'
+  | 'scenario'
+  | 'personality'
+  | 'example_dialogue'
+  | 'history'
+  | 'ujb'
+  | 'post'
+  | 'memory'
+  | 'chat_age'
+  | 'idle_duration'
+  | 'all_personalities'
+  | 'chat_embed'
+  | 'user_embed'
+  | 'impersonating'
+  | 'system_prompt'
+  | 'random'
+  | 'json'
+  | 'value'
+
+type RepeatableHolder = Extract<
+  Holder,
+  'char' | 'user' | 'chat_age' | 'roll' | 'random' | 'idle_duration'
+>
+
+const repeatableHolders = new Set<RepeatableHolder | 'roll'>([
+  'char',
+  'user',
+  'chat_age',
+  'idle_duration',
+  'random',
+  'roll',
+])
+
+type IterableHolder = 'history' | 'bots' | 'chat_embed'
+
+type ChatEmbedProp = 'i' | 'name' | 'text'
+type HistoryProp = 'i' | 'message' | 'dialogue' | 'name' | 'isuser' | 'isbot'
+type BotsProp = 'i' | 'personality' | 'name'
 
 /**
  * This function also returns inserts because Chat and Claude discard the
@@ -123,28 +176,60 @@ export async function parseTemplate(
   length?: number
   linesAddedCount: number
   history?: string[]
+  sections: NonNullable<TemplateOpts['sections']>
 }> {
   if (opts.limit) {
     opts.limit.output = {}
   }
 
+  const sections: TemplateOpts['sections'] = {
+    flags: {},
+    sections: { system: [], history: [], post: [] },
+    done: false,
+  }
+
+  opts.sections = sections
+
   const parts = opts.parts || {}
 
   if (parts.systemPrompt) {
+    opts.isPart = true
     parts.systemPrompt = render(parts.systemPrompt, opts)
+    opts.isPart = false
   }
 
   if (parts.ujb) {
+    opts.isPart = true
     parts.ujb = render(parts.ujb, opts)
+    opts.isPart = false
   }
 
   const ast = parser.parse(template, {}) as PNode[]
   readInserts(opts, ast)
   let output = render(template, opts, ast)
+  opts.sections.done = true
   let unusedTokens = 0
   let linesAddedCount = 0
 
+  // Many users have tried to fix 'continue' - we will leave this here as a cold reminder that it cannot be fixed
+
+  /** Remove everything after history to attempt to perform a 'continue' */
+  // if (opts.continue && output.includes(HISTORY_MARKER)) {
+  //   const index = output.indexOf(HISTORY_MARKER)
+  //   if (index > -1) {
+  //     output = output.slice(0, index + HISTORY_MARKER.length)
+  //   }
+  // }
+
+  /**
+   * Some placeholders require re-parsing as they also contain placeholders
+   */
+  opts.isFinal = true
+  const result = render(output, opts).replace(/\r\n/g, '\n').replace(/\n\n+/g, '\n\n').trim()
+  opts.isFinal = false
+
   /** Replace iterators */
+  let history: string[] = []
   if (opts.limit && opts.limit.output) {
     for (const [id, { lines, src }] of Object.entries(opts.limit.output)) {
       src
@@ -158,8 +243,9 @@ export async function parseTemplate(
       })
       unusedTokens = filled.unusedTokens
       const trimmed = filled.adding.slice().reverse()
-      output = output.replace(id, trimmed.join('\n'))
+      output = output.replace(new RegExp(id, 'gi'), trimmed.join('\n'))
       linesAddedCount += filled.linesAddedCount
+      history = trimmed
     }
 
     // Adding the low priority blocks if we still have the budget for them,
@@ -177,12 +263,30 @@ export async function parseTemplate(
     }
   }
 
-  const result = render(output, opts).replace(/\r\n/g, '\n').replace(/\n\n+/g, '\n\n').trimStart()
+  opts.isFinal = true
+  output = render(output, opts).replace(/\r\n/g, '\n').replace(/\n\n+/g, '\n\n').trim()
+
+  sections.sections.history = history
+
+  // console.log(
+  //   '@System Prompt\n',
+  //   sections.sections.system.join(''),
+  //   '\n@Definitions\n',
+  //   sections.sections.def.join(''),
+  //   '\n@History\n',
+  //   sections.sections.history.join(''),
+  //   '\n@Post\n',
+  //   sections.sections.post.join('')
+  // )
+
+  output = output.replace(/\r\n/g, '\n').replace(/\n\n+/g, '\n\n').trim()
+
   return {
-    parsed: result,
+    parsed: output,
     inserts: opts.inserts ?? new Map(),
     length: await opts.limit?.encoder?.(result),
     linesAddedCount,
+    sections,
   }
 }
 
@@ -240,13 +344,23 @@ function render(template: string, opts: TemplateOpts, existingAst?: PNode[]) {
     }
 
     const output: string[] = []
+    let prevMarker: Section = 'system'
 
     for (let i = 0; i < ast.length; i++) {
       const parent = ast[i]
 
       const result = renderNode(parent, opts)
 
-      if (result) output.push(result)
+      const marker = getMarker(opts, parent, prevMarker)
+      prevMarker = marker
+
+      if (!opts.sections?.done) {
+        fillSection(opts, marker, result)
+      }
+
+      if (result) {
+        output.push(result)
+      }
     }
     return output.join('').replace(/\n\n+/g, '\n\n')
   } catch (err) {
@@ -264,24 +378,31 @@ function renderNodes(nodes: PNode[], opts: TemplateOpts) {
   return output.join('')
 }
 
-function renderNode(node: PNode, opts: TemplateOpts) {
+function renderNode(node: PNode, opts: TemplateOpts, conditionText?: string) {
   if (typeof node === 'string') {
     return node
   }
 
   switch (node.kind) {
     case 'placeholder': {
-      return getPlaceholder(node, opts)
+      const result = getPlaceholder(node, opts, conditionText)
+      return result
     }
 
-    case 'each':
-      return renderIterator(node.value, node.children, opts)
+    case 'each': {
+      const result = renderIterator(node.value, node.children, opts)
+      return result
+    }
 
-    case 'if':
-      return renderCondition(node, node.children, opts)
+    case 'if': {
+      const result = renderCondition(node, node.children, opts)
+      return result
+    }
 
-    case 'lowpriority':
-      return renderLowPriority(node, opts)
+    case 'lowpriority': {
+      const result = renderLowPriority(node, opts)
+      return result
+    }
   }
 }
 
@@ -301,7 +422,8 @@ function renderLowPriority(node: LowPriorityNode, opts: TemplateOpts) {
     const result = renderNode(child, opts)
     if (result) output.push(result)
   }
-  opts.lowpriority = opts.lowpriority ?? []
+
+  opts.lowpriority ??= []
   const lowpriorityBlockId = '__' + v4() + '__'
   opts.lowpriority.push({ id: lowpriorityBlockId, content: output.join('') })
   return lowpriorityBlockId
@@ -311,6 +433,21 @@ function renderProp(node: CNode, opts: TemplateOpts, entity: unknown, i: number)
   if (typeof node === 'string') return node
 
   switch (node.kind) {
+    case 'placeholder': {
+      switch (node.value) {
+        case 'char':
+        case 'user':
+        case 'json':
+        case 'random':
+        case 'roll':
+        case 'idle_duration':
+          return getPlaceholder(node, opts)
+
+        default:
+          return
+      }
+    }
+
     case 'bot-if':
     case 'bot-prop': {
       const bot = entity as AppSchema.Character
@@ -385,15 +522,38 @@ function renderProp(node: CNode, opts: TemplateOpts, entity: unknown, i: number)
   }
 }
 
-function renderCondition(node: ConditionNode, children: PNode[], opts: TemplateOpts) {
+function renderCondition(
+  node: ConditionNode,
+  children: ConditionNode['children'],
+  opts: TemplateOpts
+) {
   if (opts.repeatable) return ''
 
+  const elseblock = children
+    .filter((ch) => typeof ch !== 'string' && ch.kind === 'else')
+    .slice(-1)[0] as ElseNode | undefined
+
+  const elseOutput: string[] = []
+  for (const block of elseblock?.children || []) {
+    const result = renderNode(block, opts)
+    if (result) elseOutput.push(result)
+  }
+
   const value = getPlaceholder(node, opts)
-  if (!value) return
+  if (!value) {
+    if (elseOutput.length) {
+      return elseOutput.join('')
+    }
+    return
+  }
 
   const output: string[] = []
   for (const child of children) {
-    const result = renderNode(child, opts)
+    if (typeof child !== 'string' && child.kind === 'else') continue
+    const isPart = opts.isPart
+    opts.isPart = false
+    const result = renderNode(child, opts, value)
+    opts.isPart = isPart
     if (result) output.push(result)
   }
 
@@ -479,8 +639,11 @@ function renderIterator(holder: IterableHolder, children: CNode[], opts: Templat
   }
 
   if (isHistory && opts.limit?.output) {
-    const id = '__' + v4() + '__'
+    const id = HISTORY_MARKER
     opts.limit.output[id] = { src: holder, lines: output }
+    if (opts.sections) {
+      opts.sections.flags.history = true
+    }
     return id
   }
 
@@ -498,15 +661,35 @@ function renderEntityCondition(nodes: CNode[], opts: TemplateOpts, entity: unkno
   return result
 }
 
-function getPlaceholder(node: PlaceHolder | ConditionNode, opts: TemplateOpts) {
+function getPlaceholder(
+  node: PlaceHolder | ConditionNode,
+  opts: TemplateOpts,
+  conditionText?: string
+) {
   if (opts.repeatable && !repeatableHolders.has(node.value as any)) return ''
 
+  if (node.value.startsWith('json.')) {
+    const name = node.value.slice(5)
+    return opts.jsonValues?.[name] || ''
+  }
+
+  if (opts.isPart && !SAFE_PART_HOLDERS[node.value]) {
+    return `{{${node.value}}}`
+  }
+
+  if (opts.isFinal && FINAL_IGNORE_HOLDERS[node.value]) {
+    return `{{${node.value}}}`
+  }
+
   switch (node.value) {
+    case 'value':
+      return conditionText || ''
+
     case 'char':
-      return (opts.replyAs || opts.char).name || ''
+      return ((opts.replyAs || opts.char).name || '').trim()
 
     case 'user':
-      return opts.impersonate?.name || opts.sender?.handle || 'You'
+      return (opts.impersonate?.name || opts.sender?.handle || 'You').trim()
 
     case 'example_dialogue':
       return opts.parts?.sampleChat?.join('\n') || ''
@@ -525,6 +708,9 @@ function getPlaceholder(node: PlaceHolder | ConditionNode, opts: TemplateOpts) {
 
     case 'ujb':
       return opts.parts?.ujb || ''
+
+    case 'json':
+      return opts.jsonValues?.[node.values] || ''
 
     case 'post': {
       return opts.parts?.post?.join('\n') || ''
@@ -568,9 +754,10 @@ function getPlaceholder(node: PlaceHolder | ConditionNode, opts: TemplateOpts) {
     }
 
     case 'roll': {
-      const max = +node.values
-      const rand = Math.ceil(Math.random() * max)
-      return rand.toString()
+      const head = handleDice(node as DiceExpr)
+      const tails = node.extra?.reduce((p, c) => p + handleDice(c), 0) ?? 0
+
+      return (head + tails).toString()
     }
   }
 }
@@ -586,4 +773,76 @@ function lastMessage(value: string) {
 function isEnclosingNode(node: any): node is ConditionNode | IteratorNode {
   if (!node || typeof node === 'string') return false
   return node.kind === 'if'
+}
+
+function handleDice(node: DiceExpr) {
+  // N diced die
+  const max = +node.values
+
+  // Number of die to roll
+  const amt = node.amt ?? 1
+
+  // Adjustment to make to the final value of the dice roll
+  const adjust = node.adjust ?? 0
+
+  // Defined as H[0-9]+ or L[0-9]+
+  // H: Keep highest N rolls
+  // L: Keep the lowest N rolls
+  const keep = node.keep ?? amt
+
+  // Sorted descending
+  const rolls = Array.from({ length: amt }, () => Math.ceil(Math.random() * max)).sort(
+    (l, r) => r - l
+  )
+
+  const usable = keep === 0 ? rolls.slice() : keep > 0 ? rolls.slice(0, keep) : rolls.slice(keep)
+
+  const rand = usable.reduce((p, c) => p + c, 0) + adjust
+  return rand
+}
+
+function fillSection(opts: TemplateOpts, marker: Section | undefined, result: string | undefined) {
+  if (!opts.sections) return
+  if (!result) return
+  if (result === HISTORY_MARKER) return
+
+  const flags = opts.sections.flags
+  const sections = opts.sections.sections
+
+  if (!flags.system && marker === 'system') {
+    sections.system.push(result)
+    return
+  }
+
+  if (marker === 'history') {
+    flags.system = true
+    return
+  }
+
+  sections.post.push(result)
+}
+
+function getMarker(opts: TemplateOpts, node: PNode, previous: Section): Section {
+  if (!opts.sections) return previous
+  if (opts.sections.flags.history) return 'post'
+
+  if (typeof node === 'string') return previous
+
+  switch (node.kind) {
+    case 'placeholder': {
+      if (node.value === 'history') return 'history'
+      if (node.value === 'system_prompt') return 'system'
+      return previous
+    }
+
+    case 'each':
+      if (node.value === 'history') return 'history'
+      return previous
+
+    case 'if':
+      if (node.value === 'system_prompt') return 'system'
+      return previous
+  }
+
+  return previous
 }

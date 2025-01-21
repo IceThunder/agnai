@@ -1,21 +1,22 @@
 import needle from 'needle'
-import { ModelAdapter } from './type'
+import { Completion, Inference, ModelAdapter } from './type'
 import { decryptText } from '../db/util'
-import { sanitise, trimResponseV2 } from '../api/chat/common'
 import { registerAdapter } from './register'
 import { getStoppingStrings } from './prompt'
+import { sanitise, sanitiseAndTrim, trimResponseV2 } from '/common/requests/util'
+import { streamCompletion } from './stream'
+import { requestFullCompletion } from './chat-completion'
+import { getCompletionContent } from './openai'
 
-const mancerOptions: Record<string, string> = {
-  'OpenAssistant ORCA': 'https://neuro.mancer.tech/webui/oa-orca/api',
-  'Wizard Vicuna': 'https://neuro.mancer.tech/webui/wizvic/api',
-}
+const mancerOptions: Record<string, string> = {}
 
 let modelCache: MancerModel[]
 
 export type MancerModel = {
   id: string
   name: string
-  perToken: number
+  perTokenOutput: number
+  perTokenPrompt: number
   paidOnly: boolean
   context: number
   online: boolean
@@ -27,39 +28,49 @@ export type MancerModel = {
 const modelOptions = Object.entries(mancerOptions).map(([label, value]) => ({ label, value }))
 
 export const handleMancer: ModelAdapter = async function* (opts) {
-  const body = {
+  const { gen } = opts
+  const url = 'https://neuro.mancer.tech/oai/v1/completions'
+
+  const userModel: string = opts.gen.registered?.mancer?.url || opts.user.adapterConfig?.mancer?.url
+
+  const model = userModel ? modelCache.find((m) => userModel.includes(m.id))?.id : null
+  const body: any = {
     prompt: opts.prompt,
-    add_bos_token: opts.gen.addBosToken ?? false,
-    ban_eos_token: opts.gen.banEosToken ?? false,
-    do_sample: true,
+    model,
+    ignore_eos: !opts.gen.banEosToken,
     max_new_tokens: opts.gen.maxTokens,
-    temperature: opts.gen.temp,
+    temperature: opts.gen.temp!,
     top_a: opts.gen.topA,
     top_k: opts.gen.topK,
     top_p: opts.gen.topP,
+    min_p: gen.minP,
     length_penalty: 1,
-    truncation_length: opts.gen.maxContextLength,
+    max_tokens: opts.gen.maxContextLength,
     typical_p: opts.gen.typicalP,
-    encoder_repetition_penalty: opts.gen.encoderRepitionPenalty,
     repetition_penalty: opts.gen.repetitionPenalty,
-    repetition_penalty_range: opts.gen.repetitionPenaltyRange,
-    skip_special_tokens: true,
+    presence_penalty: opts.gen.presencePenalty,
+    frequency_penalty: opts.gen.frequencyPenalty,
     tfs: opts.gen.tailFreeSampling,
-    penalty_alpha: opts.gen.penaltyAlpha,
-    num_beams: 1,
     seed: -1,
     stop: getStoppingStrings(opts),
+    smoothing_factor: gen.smoothingFactor,
+    smoothing_curve: gen.smoothingCurve,
+    stream: opts.gen.streamResponse,
   }
 
-  const url =
-    opts.gen.registered?.mancer?.urlOverride ||
-    opts.gen.registered?.mancer?.url ||
-    opts.gen.registered?.mancer?.model ||
-    opts.user.adapterConfig?.mancer?.altUrl ||
-    opts.user.adapterConfig?.mancer?.url
+  if (gen.dynatemp_range) {
+    if (gen.dynatemp_range >= gen.temp!) {
+      gen.dynatemp_range = gen.temp! - 0.1
+    }
 
-  if (!url) {
-    yield { error: `Mancer request failed: Model/URL not set` }
+    body.dynatemp_min = (gen.temp ?? 1) - (gen.dynatemp_range ?? 0)
+    body.dynatemp_max = (gen.temp ?? 1) + (gen.dynatemp_range ?? 0)
+    body.dynatemp_exponent = gen.dynatemp_exponent
+    body.dynatemp_mode = 1
+  }
+
+  if (!model) {
+    yield { error: 'Mancer request failed: Select a model and try again' }
     return
   }
 
@@ -79,42 +90,61 @@ export const handleMancer: ModelAdapter = async function* (opts) {
     'X-API-KEY': apiKey,
   }
 
-  const resp = await needle('post', `${url}/v1/generate`, body, {
-    json: true,
-    headers,
-  }).catch((error) => ({ error }))
+  let accumulated = ''
+  let response: Completion<Inference> | undefined
 
-  if ('error' in resp) {
-    opts.log.error({ err: resp.error })
-    yield { error: `Mancer request failed: ${resp.error?.message || resp.error}` }
-    return
-  }
+  const iter = opts.gen.streamResponse
+    ? streamCompletion(opts.user._id, url, headers, body, 'mancer', opts.log, 'openai')
+    : requestFullCompletion(opts.user._id, url, headers, body, 'mancer', opts.log)
 
-  if (resp.statusCode && resp.statusCode >= 400) {
-    opts.log.error({ err: resp.body }, `Mancer request failed [${resp.statusCode}]`)
-    yield {
-      error: `Mancer request failed (${resp.statusCode}) ${
-        resp.body.error || resp.body.message || resp.statusMessage
-      }`,
+  while (true) {
+    let generated = await iter.next()
+
+    // Both the streaming and non-streaming generators return a full completion and yield errors.
+    if (generated.done) {
+      response = generated.value
+      break
     }
-    return
-  }
 
-  try {
-    const text = resp.body.results?.[0]?.text
-    if (!text) {
-      yield {
-        error: `Mancer request failed: Received empty response. Try again.`,
-      }
+    if (generated.value.error) {
+      yield { error: generated.value.error }
       return
     }
-    yield { meta: { 'credits-spent': resp.body['x-spent-credits'] } }
-    const parsed = sanitise(text.replace(opts.prompt, ''))
-    const trimmed = trimResponseV2(parsed, opts.replyAs, opts.members, opts.characters, [
-      'END_OF_DIALOG',
-    ])
+
+    // Only the streaming generator yields individual tokens.
+    if ('token' in generated.value) {
+      accumulated += generated.value.token
+      yield {
+        partial: sanitiseAndTrim(
+          accumulated,
+          opts.prompt,
+          opts.char,
+          opts.characters,
+          opts.members
+        ),
+      }
+    }
+  }
+  try {
+    let text = getCompletionContent(response, opts.log)
+    if (text instanceof Error) {
+      yield { error: `Mancer returned an error: ${text.message}` }
+      return
+    }
+
+    if (!text?.length) {
+      opts.log.error({ body: response }, 'Mancer request failed: Empty response')
+      yield { error: `Mancer request failed: Received empty response. Try again.` }
+      return
+    }
+
+    accumulated = text
+
+    const parsed = sanitise(accumulated.replace(opts.prompt, ''))
+    const trimmed = trimResponseV2(parsed, opts.replyAs, opts.members, opts.characters, body.stop)
     yield trimmed || parsed
   } catch (ex: any) {
+    opts.log.error({ err: ex }, 'Mancer failed to parse')
     yield { error: `Mancer request failed: ${ex.message}` }
     return
   }
@@ -128,15 +158,6 @@ registerAdapter('mancer', handleMancer, {
       label: 'Model',
       secret: false,
       setting: { type: 'list', options: modelOptions },
-      preset: true,
-    },
-    {
-      field: 'urlOverride',
-      label: 'URL Override (See: https://mancer.tech/models.html)',
-      helperText:
-        '(Optional) Overrides the URL from the model selected above - Leave empty if unsure.',
-      secret: false,
-      setting: { type: 'text', placeholder: 'https://neuro.mancer.tech/webui/...../api' },
       preset: true,
     },
     {
@@ -173,11 +194,11 @@ export async function getMancerModels() {
 
       modelOptions.length = 0
       for (const model of res.body.models as MancerModel[]) {
-        const url = `https://neuro.mancer.tech/webui/${model.id}/api`
-        mancerOptions[model.name] = url
         modelOptions.push({
-          label: `${model.paidOnly ? '(Paid) ' : ''} ${model.name} (${model.perToken}cr/token)`,
-          value: url,
+          label: `${model.paidOnly ? '(Paid) ' : ''} ${model.name} (${
+            model.perTokenOutput
+          }cr/out + ${model.perTokenPrompt}/prompt)`,
+          value: model.id,
         })
       }
     }

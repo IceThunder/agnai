@@ -1,4 +1,13 @@
-import { ImagePlus, Megaphone, MoreHorizontal, PlusCircle, Send, Zap } from 'lucide-solid'
+import {
+  ImagePlus,
+  ImageUp,
+  Megaphone,
+  MessageCircle,
+  MoreHorizontal,
+  PlusCircle,
+  Send,
+  Zap,
+} from 'lucide-solid'
 import {
   Component,
   createMemo,
@@ -27,7 +36,7 @@ import { SpeechRecognitionRecorder } from './SpeechRecognitionRecorder'
 import { Toggle } from '/web/shared/Toggle'
 import { defaultCulture } from '/web/shared/CultureCodes'
 import { createDebounce } from '/web/shared/util'
-import { useDraft, useEffect } from '/web/shared/hooks'
+import { useDraft, useEffect, useMobileDetect } from '/web/shared/hooks'
 import { eventStore } from '/web/store/event'
 import { useAppContext } from '/web/store/context'
 import NoCharacterIcon from '/web/icons/NoCharacterIcon'
@@ -35,8 +44,8 @@ import WizardIcon from '/web/icons/WizardIcon'
 import { EVENTS, events } from '/web/emitter'
 import { AutoComplete } from '/web/shared/AutoComplete'
 import FileInput, { FileInputResult, getFileAsDataURL } from '/web/shared/FileInput'
-import { embedApi } from '/web/store/embeddings'
 import AvatarIcon from '/web/shared/AvatarIcon'
+import { ALLOWED_TYPES } from '/web/store/data/image'
 
 const InputBar: Component<{
   chat: AppSchema.Chat
@@ -93,6 +102,8 @@ const InputBar: Component<{
   const [cleared, setCleared] = createSignal(0, { equals: false })
   const [complete, setComplete] = createSignal(false)
   const [listening, setListening] = createSignal(false)
+  const [dragging, setDragging] = createSignal(false)
+  const mob = useMobileDetect()
 
   const completeOpts = createMemo(() => {
     const list = ctx.activeBots.map((char) => ({ label: char.name, value: char._id }))
@@ -214,16 +225,31 @@ const InputBar: Component<{
     const [file] = files
     if (!file) return
 
-    const buffer = await getFileAsDataURL(file.file)
-    const caption = await embedApi.captionImage(buffer.content)
-    setText(`*{{user}} shows {{char}} a picture that contains: ${caption}*`)
-    send()
+    return attach(file.file)
+  }
+
+  const attach = async (file: File) => {
+    const ext = file.name.split('.').slice(-1)[0]
+    const isAllowed = ALLOWED_TYPES.has(ext)
+    if (!isAllowed) {
+      toastStore.warn(`Invalid file type: Must be an image`)
+      return
+    }
+
+    const buffer = await getFileAsDataURL(file)
+    if (file.size > 1024 * 1024 * 1024) {
+      toastStore.warn(`Attachment exceeds size limit (1MB)`)
+      return
+    }
+
+    msgStore.setAttachment(props.chat._id, buffer.content)
+    setMenu(false)
   }
 
   return (
-    <div class="relative flex items-end justify-center">
+    <div class="relative flex items-start justify-center rounded-md bg-[var(--bg-800)]">
       <Show when={props.showOocToggle}>
-        <div class="cursor-pointer p-2" onClick={toggleOoc}>
+        <div class="flex h-[40px] cursor-pointer items-center p-2" onClick={toggleOoc}>
           <Show when={!props.ooc}>
             <WizardIcon />
           </Show>
@@ -233,7 +259,7 @@ const InputBar: Component<{
         </div>
       </Show>
 
-      <div class="flex items-center sm:hidden">
+      <div class="flex h-[40px] items-center sm:hidden">
         <a
           href="#"
           role="button"
@@ -244,7 +270,7 @@ const InputBar: Component<{
           <AvatarIcon
             avatarUrl={chars.impersonating?.avatar || user.profile?.avatar}
             format={{ corners: 'circle', size: 'sm' }}
-            class="mr-2"
+            class="ml-1 mr-2"
           />
         </a>
       </div>
@@ -266,32 +292,58 @@ const InputBar: Component<{
         value={text()}
         placeholder={placeholder()}
         parentClass="flex w-full"
-        class="input-bar rounded-r-none hover:bg-[var(--bg-800)] active:bg-[var(--bg-800)]"
+        classList={{ 'blur-md': dragging() }}
+        class="input-bar max-h-[120px] min-h-[40px] rounded-r-none hover:bg-[var(--bg-800)] active:bg-[var(--bg-800)]"
         onKeyDown={(ev) => {
           if (ev.key === '@') {
             setComplete(true)
           }
 
-          const isMobileDevice = /Mobi/i.test(window.navigator.userAgent)
-          const canMobileSend = isMobileDevice ? user.ui.mobileSendOnEnter : true
+          const canMobileSend = mob() ? user.ui.mobileSendOnEnter : true
           if (ev.key === 'Enter' && !ev.shiftKey && canMobileSend) {
             if (complete()) return
             send()
             ev.preventDefault()
           }
         }}
-        onInput={updateText}
+        onChange={updateText}
+        textarea={{
+          onDragOver: () => setDragging(true),
+          onDragExit: () => setDragging(false),
+          onDragEnd: () => setDragging(false),
+          onDrop: (ev) => {
+            ev.preventDefault()
+            setDragging(false)
+            const file = ev.dataTransfer?.files[0]
+            if (!file) return
+
+            attach(file)
+          },
+        }}
       />
-      <Button schema="clear" onClick={onButtonClick} class="h-full px-2 py-2">
+      <Button
+        schema="clear"
+        onClick={onButtonClick}
+        class="tour-message-actions h-full bg-[var(--bg-800)] px-2 py-2"
+      >
         <MoreHorizontal class="icon-button" />
       </Button>
 
       <DropMenu show={menu()} close={() => setMenu(false)} vert="up" horz="left">
         <div class="flex w-48 flex-col gap-2 p-2">
-          {/* <Button schema="secondary" class="w-full" onClick={generateSelf} alignLeft>
-              <MessageCircle size={18} />
-              Respond as Me
-            </Button> */}
+          <Button
+            schema="secondary"
+            class="w-full"
+            onClick={() => {
+              setMenu(false)
+              msgStore.selfGenerate()
+            }}
+            alignLeft
+            disabled={!ctx.impersonate}
+          >
+            <MessageCircle size={18} />
+            Respond as Me
+          </Button>
           <Show when={ctx.activeBots.length > 1}>
             <div>Auto-reply</div>
             <Button
@@ -356,24 +408,28 @@ const InputBar: Component<{
               accept="image/jpg,image/png,image/jpeg"
             />
             <LabelButton for="imageCaption" schema="secondary" class="w-full" alignLeft>
-              Send Image
+              <ImageUp size={18} />
+              Attach Image
             </LabelButton>
           </Show>
         </div>
       </DropMenu>
       <Switch>
         <Match when={user.user?.speechtotext && (text() === '' || listening())}>
-          <SpeechRecognitionRecorder
-            culture={props.char?.culture}
-            onText={(value) => setText(value)}
-            onSubmit={() => send()}
-            cleared={cleared}
-            listening={setListening}
-          />
+          <div class="flex h-full items-center">
+            <SpeechRecognitionRecorder
+              culture={props.char?.culture}
+              onText={(value) => setText(value)}
+              onSubmit={() => send()}
+              cleared={cleared}
+              listening={setListening}
+              class="h-full bg-[var(--bg-800)]"
+            />
+          </div>
         </Match>
 
         <Match when>
-          <Button schema="clear" onClick={send}>
+          <Button schema="clear" onClick={send} class="mt-1">
             <Send class="icon-button" size={18} />
           </Button>
         </Match>

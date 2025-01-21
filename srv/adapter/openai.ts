@@ -1,22 +1,21 @@
-import { sanitiseAndTrim } from '../api/chat/common'
-import { ModelAdapter } from './type'
+import { sanitiseAndTrim } from '/common/requests/util'
+import { ChatRole, ModelAdapter } from './type'
 import { defaultPresets } from '../../common/presets'
-import { OPENAI_CHAT_MODELS } from '../../common/adapters'
+import { OPENAI_CHAT_MODELS, OPENAI_MODELS } from '../../common/adapters'
 import { AppSchema } from '../../common/types/schema'
-import { config } from '../config'
-import { AppLog } from '../logger'
-import { requestFullCompletion, streamCompletion, toChatCompletionPayload } from './chat-completion'
+import { AppLog } from '../middleware'
+import { requestFullCompletion, toChatCompletionPayload } from './chat-completion'
 import { decryptText } from '../db/util'
+import { streamCompletion } from './stream'
+import { getTokenCounter } from '../tokenize'
 
 const baseUrl = `https://api.openai.com`
 
-type Role = 'user' | 'assistant' | 'system'
-
-type CompletionItem = { role: Role; content: string; name?: string }
 type CompletionContent<T> = Array<{ finish_reason: string; index: number } & ({ text: string } | T)>
-type Inference = { message: { content: string; role: Role } }
 
-type Completion<T = Inference> = {
+export type Inference = { message: { content: string; role: ChatRole } }
+
+export type Completion<T = Inference> = {
   id: string
   created: number
   model: string
@@ -35,7 +34,6 @@ export const handleOAI: ModelAdapter = async function* (opts) {
   }
 
   const oaiModel = gen.thirdPartyModel || gen.oaiModel || defaultPresets.openai.oaiModel
-
   const maxResponseLength = gen.maxTokens ?? defaultPresets.openai.maxTokens
 
   const body: any = {
@@ -50,13 +48,18 @@ export const handleOAI: ModelAdapter = async function* (opts) {
   body.presence_penalty = gen.presencePenalty ?? defaultPresets.openai.presencePenalty
   body.frequency_penalty = gen.frequencyPenalty ?? defaultPresets.openai.frequencyPenalty
 
-  const useChat =
-    (isThirdParty && gen.thirdPartyFormat === 'openai-chat') || !!OPENAI_CHAT_MODELS[oaiModel]
-
+  const isChatFormat =
+    gen.thirdPartyFormat === 'openai-chat' || gen.thirdPartyFormat == 'openai-chatv2'
+  const useChat = (isThirdParty && isChatFormat) || !!OPENAI_CHAT_MODELS[oaiModel]
   if (useChat) {
-    const messages: CompletionItem[] = config.inference.flatChatCompletion
-      ? [{ role: 'system', content: opts.prompt }]
-      : await toChatCompletionPayload(opts, body.max_tokens)
+    const messages =
+      gen.thirdPartyFormat === 'openai-chatv2' && opts.messages
+        ? opts.messages
+        : await toChatCompletionPayload(
+            opts,
+            getTokenCounter('openai', OPENAI_MODELS.Turbo),
+            body.max_tokens
+          )
 
     body.messages = messages
     yield { prompt: messages }
@@ -67,20 +70,27 @@ export const handleOAI: ModelAdapter = async function* (opts) {
 
   if (gen.antiBond) body.logit_bias = { 3938: -50, 11049: -50, 64186: -50, 3717: -25 }
 
-  const useThirdPartyPassword = base.changed && isThirdParty && user.thirdPartyPassword
-  const apiKey = useThirdPartyPassword
+  const useThirdPartyPassword =
+    base.changed && isThirdParty && (gen.thirdPartyKey || user.thirdPartyPassword)
+
+  let apiKey = useThirdPartyPassword
     ? gen.thirdPartyKey || user.thirdPartyPassword
     : !isThirdParty
     ? user.oaiKey
     : null
-  const bearer = !!guest ? `Bearer ${apiKey}` : apiKey ? `Bearer ${decryptText(apiKey)}` : null
+
+  if (!guest && apiKey) {
+    apiKey = decryptText(apiKey)
+  }
+  const bearer = !!apiKey ? `Bearer ${apiKey}` : null
 
   const headers: any = {
     'Content-Type': 'application/json',
   }
 
-  if (bearer) {
+  if (apiKey) {
     headers.Authorization = bearer
+    headers['X-RapidAPI-Key'] = apiKey
   }
 
   log.debug(body, 'OpenAI payload')
@@ -160,7 +170,7 @@ export type OAIUsage = {
   total_usage: number
 }
 
-function getCompletionContent(completion: Completion<Inference> | undefined, log: AppLog) {
+export function getCompletionContent(completion: Completion<Inference> | undefined, log: AppLog) {
   if (!completion) {
     return ''
   }

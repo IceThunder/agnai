@@ -28,10 +28,13 @@ import TextInput from '/web/shared/TextInput'
 import Button from '/web/shared/Button'
 import { neat } from '/common/util'
 import { HelpModal } from '/web/shared/Modal'
+import { Toggle } from '/web/shared/Toggle'
+import { AppSchema } from '/common/types/index'
+import { SetStoreFunction } from 'solid-js/store'
 
 const AISettings: Component<{
-  onHordeWorkersChange: (workers: string[]) => void
-  onHordeModelsChange: (models: string[]) => void
+  state: AppSchema.User
+  setter: SetStoreFunction<AppSchema.User>
 }> = (props) => {
   const [query] = useSearchParams()
   const state = userStore()
@@ -40,8 +43,6 @@ const AISettings: Component<{
     server: s.config.serverConfig,
   }))
   const presets = presetStore((s) => s.presets.filter((pre) => !!pre.service))
-
-  let keyRef: any
   const [apiKey, setApiKey] = createSignal(state.user?.apiKey || '')
 
   const revealKey = () => {
@@ -93,7 +94,6 @@ const AISettings: Component<{
     )
     return opts
   })
-  const [presetId, setPresetId] = createSignal(state.user?.defaultPreset || '')
 
   const canUseApi = createMemo(() => {
     if (!cfg.server) return false
@@ -115,14 +115,20 @@ const AISettings: Component<{
       </Show>
 
       <Show when={ready()}>
+        <Toggle
+          value={!props.state.disableLTM}
+          label="Enable Embeddings/Long-Term Memory"
+          helperMarkdown={`Improves site performance when disabled. Disable long-term memory if your chat is _laggy_ and unresponsive.`}
+          onChange={(ev) => props.setter('disableLTM', !ev)}
+        />
+
         <Show when={!canUseApi()}>
           <PresetSelect
-            fieldName="defaultPreset"
             label="Default Preset"
             helperText="The initially selected preset when creating a new chat. "
             options={presetOptions()}
-            selected={presetId()}
-            setPresetId={setPresetId}
+            selected={props.state.defaultPreset}
+            setPresetId={(ev) => props.setter('defaultPreset', ev)}
           />
         </Show>
 
@@ -132,7 +138,7 @@ const AISettings: Component<{
               title="Agnaistic API Access"
               cta={
                 <div>
-                  <a class="link">How use to API Access</a>
+                  <a class="link">How to use API Access</a>
                 </div>
               }
               markdown={ApiAccessHelp}
@@ -143,8 +149,8 @@ const AISettings: Component<{
               label="Default/API Access Preset"
               helperText="Preset used when using API access. Also the initially selected preset when creating a new chat."
               options={presetOptions()}
-              selected={presetId()}
-              setPresetId={setPresetId}
+              selected={props.state.defaultPreset}
+              setPresetId={(ev) => props.setter('defaultPreset', ev)}
             />
 
             <TextInput
@@ -168,7 +174,6 @@ const AISettings: Component<{
                   </Show>
                 </div>
               }
-              ref={keyRef}
               label="API Key"
               readonly
               placeholder="API Key Hidden"
@@ -187,34 +192,31 @@ const AISettings: Component<{
       </Show>
 
       <div class={currentTab() === ADAPTER_LABELS.horde ? tabClass : 'hidden'}>
-        <HordeAISettings
-          onHordeWorkersChange={props.onHordeWorkersChange}
-          onHordeModelsChange={props.onHordeModelsChange}
-        />
+        <HordeAISettings state={props.state} setter={props.setter} />
       </div>
 
       <div class={currentTab() === ADAPTER_LABELS.kobold ? tabClass : 'hidden'}>
-        <KoboldAISettings />
+        <KoboldAISettings state={props.state} setter={props.setter} />
       </div>
 
       <div class={currentTab() === ADAPTER_LABELS.ooba ? tabClass : 'hidden'}>
-        <OobaAISettings />
+        <OobaAISettings state={props.state} setter={props.setter} />
       </div>
 
       <div class={currentTab() === ADAPTER_LABELS.openai ? tabClass : 'hidden'}>
-        <OpenAISettings />
+        <OpenAISettings state={props.state} setter={props.setter} />
       </div>
 
       <div class={currentTab() === ADAPTER_LABELS.scale ? tabClass : 'hidden'}>
-        <ScaleSettings />
+        <ScaleSettings state={props.state} setter={props.setter} />
       </div>
 
       <div class={currentTab() === ADAPTER_LABELS.novel ? tabClass : 'hidden'}>
-        <NovelAISettings />
+        <NovelAISettings state={props.state} setter={props.setter} />
       </div>
 
       <div class={currentTab() === ADAPTER_LABELS.claude ? tabClass : 'hidden'}>
-        <ClaudeSettings />
+        <ClaudeSettings state={props.state} setter={props.setter} />
       </div>
 
       <For each={cfg.config.registered}>
@@ -237,7 +239,7 @@ const AISettings: Component<{
               </Match>
             </Switch>
 
-            <RegisteredSettings service={each} />
+            <RegisteredSettings service={each} state={props.state} setter={props.setter} />
           </div>
         )}
       </For>
@@ -248,11 +250,14 @@ const AISettings: Component<{
 export default AISettings
 
 const ApiAccessHelp = neat`
-  The subscriber API endpoint uses the *OpenAI Text Completion* format.
+  The subscriber API endpoint uses the *OpenAI Text Completion* or *OpenAI Chat Completion* format.
 
-  1. Select your \`API Access Preset\`: This preset will be used for your API calls.
+  The full URL for these endpoints are:
+  - https://api.agnai.chat/v1/completions
+  - https://api.agnai.chat/v1/chat/completions
+
+  **Instructions**:
+  1. Select your \`API Access Preset\`: This preset will be used for your API calls. Change this on your settings page.
   2. Generate your API Key.
   3. Use the API URL \`https://api.agnai.chat\` and your generated API key.
-
-  *SillyTavern*: Use _Ooba_ as the backend
 `

@@ -5,6 +5,10 @@ import { NewCharacter, UpdateCharacter } from '../character'
 import { loadItem, localApi } from './storage'
 import { appendFormOptional, strictAppendFormOptional } from '/web/shared/util'
 import { getImageData } from './image'
+import { replace } from '/common/util'
+import { TickHandler } from '/common/prompt'
+import { rootModalStore } from '../root-modal'
+import { genApi } from './inference'
 
 export const charsApi = {
   getCharacterDetail,
@@ -13,9 +17,11 @@ export const charsApi = {
   editAvatar,
   deleteCharacter,
   editCharacter,
+  editPartialCharacter,
   createCharacter,
   getImageBuffer: getFileBuffer,
   setFavorite,
+  publishCharacter,
 }
 
 async function getCharacterDetail(charId: string) {
@@ -32,6 +38,27 @@ async function getCharacterDetail(charId: string) {
   } else {
     return localApi.error(`Character not found`)
   }
+}
+
+async function publishCharacter(
+  char: Partial<AppSchema.Character>,
+  image: string | undefined,
+  onTick: TickHandler
+) {
+  const requestId = v4()
+
+  genApi.subscribe(requestId, (body, state, output) => {
+    onTick(body, state, output)
+    const info = Object.entries(output).reduce((prev, [key, value]) => {
+      prev.push(`\`${key}\`\n${value}`)
+      return prev
+    }, [] as string[])
+
+    rootModalStore.info('Moderation', info.join('\n***\n'))
+  })
+
+  const res = await api.post('/character/publish', { character: char, imageData: image, requestId })
+  return res
 }
 
 export async function getCharacters() {
@@ -121,6 +148,25 @@ export async function deleteCharacter(charId: string) {
   return { result: true, error: undefined }
 }
 
+export async function editPartialCharacter(charId: string, update: Partial<AppSchema.Character>) {
+  if (isLoggedIn()) {
+    const res = await api.post<AppSchema.Character>(`/character/${charId}/update`, update)
+    return res
+  }
+
+  const chars = await loadItem('characters')
+  const next = replace(charId, chars, update)
+
+  const nextChar = next.find((ch) => ch._id === charId)
+
+  if (!nextChar) {
+    return localApi.error(`Character update failed: Character not found`)
+  }
+
+  await localApi.saveChars(next)
+  return localApi.result(nextChar)
+}
+
 export async function editCharacter(
   charId: string,
   { avatar: file, ...char }: UpdateCharacter,
@@ -138,6 +184,7 @@ export async function editCharacter(
     appendFormOptional(form, 'tags', char.tags || [], JSON.stringify)
     strictAppendFormOptional(form, 'sampleChat', char.sampleChat)
     appendFormOptional(form, 'voice', JSON.stringify(char.voice))
+    appendFormOptional(form, 'json', JSON.stringify(char.json))
 
     if (file) {
       appendFormOptional(form, 'avatar', file)
@@ -215,6 +262,7 @@ export async function createCharacter(char: NewCharacter) {
     appendFormOptional(form, 'visualType', char.visualType)
     appendFormOptional(form, 'sprite', JSON.stringify(char.sprite))
     appendFormOptional(form, 'imageSettings', JSON.stringify(char.imageSettings))
+    appendFormOptional(form, 'json', JSON.stringify(char.json))
 
     // v2 fields start here
     appendFormOptional(form, 'alternateGreetings', char.alternateGreetings, JSON.stringify)

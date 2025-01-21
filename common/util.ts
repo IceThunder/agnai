@@ -18,6 +18,11 @@ export function findOne<T extends { _id: string }>(id: string, list: T[]): T | v
   }
 }
 
+export function round(value: number, places = 2) {
+  const pow = Math.pow(10, places)
+  return Math.round(value * pow) / pow
+}
+
 export function toArray<T>(values?: T | T[]): T[] {
   if (values === undefined) return []
   if (Array.isArray(values)) return values
@@ -143,6 +148,13 @@ const END_SYMBOLS = new Set(`."”;’'*!！?？)}]\`>~`.split(''))
 const MID_SYMBOLS = new Set(`.)}’'!?\``.split(''))
 
 export function trimSentence(text: string) {
+  if (text.trim().endsWith('```')) {
+    // We want pairs of code block symbols
+    const count = text.match(/```/g)?.length
+
+    if (count && count % 2 === 0) return text.trimEnd()
+  }
+
   let index = -1,
     checkpoint = -1
   for (let i = text.length - 1; i >= 0; i--) {
@@ -210,7 +222,7 @@ export function getMessageAuthor(opts: {
       msg.characterId === impersonate?._id
         ? impersonate
         : chars[msg.characterId] || chat.tempCharacters?.[msg.characterId]
-    return char!.name
+    return char?.name || msg.name || 'Unknown'
   }
 
   if (msg.userId) {
@@ -251,6 +263,7 @@ export type EventGenerator<T> = {
   stream: AsyncGenerator<T, T>
   push: (value: T) => void
   done: () => void
+  isDone: () => boolean
 }
 
 export function eventGenerator<T = any>(): EventGenerator<T> {
@@ -284,6 +297,7 @@ export function eventGenerator<T = any>(): EventGenerator<T> {
       if (done) return
       signal = true
     },
+    isDone: () => done,
   }
 }
 
@@ -302,7 +316,7 @@ export function clamp(toClamp: number, max: number, min?: number) {
 }
 
 export function now() {
-  return new Date().toISOString()
+  return new Date(Date.now()).toISOString()
 }
 
 export function parseStops(stops?: string[]) {
@@ -360,12 +374,13 @@ export function getUserSubscriptionTier(
   previous?: UserSub
 ): UserSub | undefined {
   let nativeTier = tiers.find((t) => user.sub && t._id === user.sub.tierId)
-  let patronTier = tiers.find((t) => user.patreon?.sub && t._id === user.patreon.sub.tierId)
+  let patronTier = getPatreonEntitledTier(user, tiers)
 
   const manualId = !isExpired(user.manualSub?.expiresAt) ? user.manualSub?.tierId : null
   let manualTier = manualId ? tiers.find((t) => t._id === manualId) : undefined
 
   const nativeExpired = isExpired(user.billing?.validUntil) || user.billing?.status === 'cancelled'
+  const patronGifted = user.patreon?.member?.attributes?.is_gifted === true
   const patronExpired =
     isExpired(user.patreon?.member?.attributes.next_charge_date) ||
     user.patreon?.member?.attributes.patron_status !== 'active_patron'
@@ -374,7 +389,7 @@ export function getUserSubscriptionTier(
     nativeTier = undefined
   }
 
-  if (patronExpired) {
+  if (patronExpired && !patronGifted) {
     patronTier = undefined
   }
 
@@ -394,6 +409,35 @@ export function getUserSubscriptionTier(
   }
 
   return result
+}
+
+export function getPatreonEntitledTier(
+  user: Pick<AppSchema.User, 'patreon'>,
+  tiers: AppSchema.SubscriptionTier[]
+) {
+  if (!user.patreon?.tier) return
+  const entitlement = user.patreon.tier.attributes?.amount_cents
+  if (!entitlement) return
+
+  return getPatreonEntitledTierByCost(entitlement, tiers)
+}
+
+export function getPatreonEntitledTierByCost(
+  entitlement: number,
+  tiers: AppSchema.SubscriptionTier[]
+) {
+  if (!entitlement) return
+
+  const tier = tiers.reduce<AppSchema.SubscriptionTier | undefined>((prev, curr) => {
+    if (!curr.enabled || curr.deletedAt) return prev
+    if (!curr.patreon) return prev
+    if (!curr.patreon.tierId) return prev
+    if (curr.patreon.cost > entitlement) return prev
+    if (prev && prev.patreon?.cost! > curr.patreon.cost) return prev
+    return curr
+  }, undefined)
+
+  return tier
 }
 
 function isExpired(expiresAt?: string, graceHrs = 3) {
@@ -420,10 +464,166 @@ function getHighestTier(
   return sorted[0] as any
 }
 
-export function tryParse(value?: any) {
+export function tryParse<T = any>(value?: any): T | undefined {
   if (!value) return
   try {
     const obj = JSON.parse(value)
     return obj
   } catch (ex) {}
+}
+
+export function parsePartialJson(value: string) {
+  {
+    const obj = tryParse(value.trim())
+    if (obj) return obj
+  }
+  {
+    const obj = tryParse(value.trim() + '}')
+    if (obj) return obj
+  }
+  {
+    const obj = tryParse(value.trim() + '"}')
+    if (obj) return obj
+  }
+}
+
+const SAFE_NAME = /[_\/'"!@#$%^&*()\[\],\.:;=+-]+/g
+
+export function hydrateTemplate(def: Ensure<AppSchema.Character['json']>, json: any) {
+  const map = new Map<string, string>()
+
+  for (const key in def.schema) {
+    map.set(key.toLowerCase().replace(SAFE_NAME, ' '), key)
+  }
+
+  const output: any = {}
+
+  for (const [key, value] of Object.entries(json)) {
+    const safe = key.replace(SAFE_NAME, ' ')
+    const alias = map.get(safe)
+
+    if (alias) {
+      output[alias] = value
+    } else {
+      output[key] = value
+    }
+  }
+
+  let response = def.response || ''
+  let history = def.history || ''
+
+  const resVars = response.match(JSON_NAME_RE())
+  const histVars = history.match(JSON_NAME_RE())
+
+  if (resVars) {
+    for (const holder of resVars) {
+      const trimmed = holder.slice(2, -2)
+      const safe = trimmed.replace(SAFE_NAME, ' ')
+      const value = output[safe] ?? output[trimmed]
+
+      response = response.split(holder).join(value ?? '')
+    }
+  }
+
+  if (histVars) {
+    for (const holder of histVars) {
+      const trimmed = holder.slice(2, -2)
+      const safe = trimmed.replace(SAFE_NAME, ' ')
+      const value = output[safe] ?? output[trimmed]
+
+      history = history.split(holder).join(value ?? '')
+    }
+  }
+
+  return { values: output, response, history }
+}
+
+export type HydratedJson = {
+  values: any
+  response: string
+  history: string
+}
+
+export const JSON_NAME_RE = () => /{{[a-zA-Z0-9 _'!@#$&*%()^=+-:;",\.<>?\/\[\]]+}}/g
+
+export function jsonHydrator(def: Ensure<AppSchema.Character['json']>) {
+  const map = new Map<string, string>()
+  const resVars = (def.response || '').match(JSON_NAME_RE())
+  const histVars = (def.history || '').match(JSON_NAME_RE())
+
+  for (const key in def.schema) {
+    map.set(key.toLowerCase().replace(SAFE_NAME, ' '), key)
+  }
+
+  const hydrate = (json: any) => {
+    const output: any = {}
+
+    for (const [key, value] of Object.entries(json)) {
+      const safe = key.replace(SAFE_NAME, ' ')
+      const alias = map.get(safe)
+
+      if (alias) {
+        output[alias] = value
+      } else {
+        output[key] = value
+      }
+    }
+
+    let response = def.response || ''
+    let history = def.history || ''
+
+    if (resVars) {
+      for (const holder of resVars) {
+        const trimmed = holder.slice(2, -2)
+        const safe = trimmed.replace(SAFE_NAME, ' ')
+        const value = output[safe] ?? output[trimmed]
+
+        response = response.split(holder).join(value ?? '')
+      }
+    }
+
+    if (histVars) {
+      for (const holder of histVars) {
+        const trimmed = holder.slice(2, -2)
+        const safe = trimmed.replace(SAFE_NAME, ' ')
+        const value = output[safe] ?? output[trimmed]
+
+        history = history.split(holder).join(value ?? '')
+      }
+    }
+
+    return { values: output, response, history }
+  }
+
+  return hydrate
+}
+
+export function getSubscriptionModelLimits(
+  model:
+    | Pick<AppSchema.SubscriptionModel, 'subLevel' | 'levels' | 'maxContextLength' | 'maxTokens'>
+    | undefined,
+  level: number
+) {
+  if (!model) return
+
+  const levels = Array.isArray(model.levels) ? model.levels.slice() : []
+
+  levels.push({
+    level: model.subLevel,
+    maxContextLength: model.maxContextLength!,
+    maxTokens: model.maxTokens,
+  })
+
+  let match: AppSchema.SubscriptionModelLevel | undefined
+
+  for (const candidate of levels) {
+    if (candidate.level > level) continue
+
+    if (!match || match.level < candidate.level) {
+      match = candidate
+      continue
+    }
+  }
+
+  return match
 }

@@ -1,12 +1,12 @@
 import { Component, Match, Switch, createEffect, createMemo, createSignal } from 'solid-js'
-import { useRootModal } from '../hooks'
-import Modal from '../Modal'
+import { RootModal } from '../Modal'
 import { RefreshCcw } from 'lucide-solid'
 import Button from '../Button'
 import { templates } from '../../../common/presets/templates'
 import Select from '../Select'
 import TextInput from '../TextInput'
 import { presetStore, toastStore } from '/web/store'
+import { PromptSuggestions, onPromptAutoComplete, onPromptKey } from './Suggestions'
 
 const builtinTemplates = Object.keys(templates).map((key) => ({
   label: `(Built-in) ${key}`,
@@ -19,13 +19,17 @@ export const SelectTemplate: Component<{
   select: (id: string, template: string) => void
   currentTemplateId: string | undefined
   currentTemplate: string | undefined
+  presetId: string | undefined
 }> = (props) => {
+  let ref: HTMLTextAreaElement
   const state = presetStore((s) => ({ templates: s.templates }))
 
   const [opt, setOpt] = createSignal(props.currentTemplateId || 'Alpaca')
+  const [templateName, setName] = createSignal(props.currentTemplate || 'Alpaca')
   const [template, setTemplate] = createSignal(templates.Alpaca)
   const [builtin, setBuiltin] = createSignal(templates.Alpaca)
   const [filter, setFilter] = createSignal('')
+  const [autoOpen, setAutoOpen] = createSignal(false)
 
   const templateOpts = createMemo(() => {
     const base = Object.entries(templates).reduce(
@@ -70,13 +74,15 @@ export const SelectTemplate: Component<{
     if (!props.show) return -1
 
     if (prev !== opts.length) {
-      const id = props.currentTemplateId || state.templates[0]._id
+      const id = props.currentTemplateId || state.templates[0]?._id
       const match = opts.find((o) => o.value === id)
 
       if (!match) return opts.length
 
       setOpt(id)
-      setTemplate(props.currentTemplate || match.template)
+      const existing = state.templates.find((t) => t._id === id)
+      setName(existing?.name || '')
+      setTemplate(existing?.template || props.currentTemplate || match.template)
       setBuiltin(match.template)
     }
 
@@ -89,7 +95,7 @@ export const SelectTemplate: Component<{
         Cancel
       </Button>
       <Switch>
-        <Match when={canSaveTemplate()}>
+        <Match when={canSaveTemplate() && !!props.presetId}>
           <Button
             onClick={() => {
               const id = opt()
@@ -100,7 +106,33 @@ export const SelectTemplate: Component<{
                 return
               }
 
-              presetStore.updateTemplate(opt(), { name: orig.name, template: update }, () => {
+              presetStore.updateTemplate(
+                opt(),
+                { name: templateName(), template: update, presetId: props.presetId },
+                () => {
+                  toastStore.success('Prompt template updated')
+                  props.select(id, update)
+                  props.close()
+                }
+              )
+            }}
+          >
+            Save and Use
+          </Button>
+        </Match>
+
+        <Match when={canSaveTemplate() && !props.presetId}>
+          <Button
+            onClick={() => {
+              const id = opt()
+              const orig = state.templates.find((t) => t._id === id)
+              const update = template()
+              if (!orig) {
+                toastStore.error(`Cannot find template to save`)
+                return
+              }
+
+              presetStore.updateTemplate(opt(), { name: templateName(), template: update }, () => {
                 toastStore.success('Prompt template updated')
                 props.select(id, update)
                 props.close()
@@ -115,18 +147,13 @@ export const SelectTemplate: Component<{
           <Button
             schema="primary"
             onClick={() => {
-              const matches = state.templates.filter((t) => t.name.startsWith(`Custom ${opt()}`))
-
-              const name =
-                matches.length > 0 ? `Custom ${opt()} #${matches.length + 1}` : `Custom ${opt()}`
-
-              presetStore.createTemplate(name, template(), (id) => {
+              presetStore.createTemplate(templateName(), template(), props.presetId, (id) => {
                 props.select(id, template())
                 props.close()
               })
             }}
           >
-            Save As
+            Create and Use
           </Button>
         </Match>
 
@@ -145,50 +172,70 @@ export const SelectTemplate: Component<{
     </>
   )
 
-  useRootModal({
-    id: 'predefined-prompt-templates',
-    element: (
-      <Modal
-        title={'Prompt Templates'}
-        show={props.show}
-        close={props.close}
-        footer={Footer}
-        maxWidth="half"
-      >
-        <div class="flex flex-col gap-4 text-sm">
-          <div class="flex gap-1">
-            <TextInput
-              fieldName="filter"
-              placeholder="Filter templates"
-              onInput={(ev) => setFilter(ev.currentTarget.value)}
-              parentClass="w-full"
-            />
-            <Button>
-              <RefreshCcw onClick={presetStore.getTemplates} />
-            </Button>
-          </div>
-          <div class="h-min-[6rem]">
-            <Select
-              fieldName="templateId"
-              items={options().filter((opt) => opt.label.toLowerCase().includes(filter()))}
-              value={opt()}
-              onChange={(ev) => {
-                setOpt(ev.value)
-                setTemplate(templateOpts()[ev.value].template)
-              }}
-            />
-          </div>
+  return (
+    <RootModal
+      title={'Prompt Templates'}
+      show={props.show}
+      close={props.close}
+      footer={Footer}
+      maxWidth="half"
+    >
+      <div class="relative flex flex-col gap-4 text-sm">
+        <div class="flex gap-1">
           <TextInput
-            fieldName="template"
-            value={template()}
-            isMultiline
-            onInput={(ev) => setTemplate(ev.currentTarget.value)}
+            fieldName="filter"
+            placeholder="Filter templates"
+            onChange={(ev) => setFilter(ev.currentTarget.value)}
+            parentClass="w-full"
+          />
+          <Button>
+            <RefreshCcw onClick={presetStore.getTemplates} />
+          </Button>
+        </div>
+        <div class="h-min-[6rem]">
+          <Select
+            fieldName="templateId"
+            items={options().filter((opt) => opt.label.toLowerCase().includes(filter()))}
+            value={opt()}
+            onChange={(ev) => {
+              setOpt(ev.value)
+
+              const matches = state.templates.filter((t) => t.name.startsWith(`Custom ${opt()}`))
+              const name = ev.label.startsWith('(Built-in)')
+                ? matches.length > 0
+                  ? `Custom ${opt()} #${matches.length + 1}`
+                  : `Custom ${opt()}`
+                : templateOpts()[ev.value].name
+              if (ev.label.startsWith('(Built-in)')) {
+              }
+
+              setName(name)
+              setTemplate(templateOpts()[ev.value].template)
+            }}
           />
         </div>
-        <div class="flex justify-end gap-2"></div>
-      </Modal>
-    ),
-  })
-
-  return null
+        <PromptSuggestions
+          onComplete={(opt) => onPromptAutoComplete(ref, opt)}
+          open={autoOpen()}
+          close={() => setAutoOpen(false)}
+          jsonValues={{ example: '', 'another long example': '', response: '' }}
+        />
+        <TextInput
+          fieldName="templateName"
+          value={templateName()}
+          onChange={(ev) => setName(ev.currentTarget.value)}
+        />
+        <TextInput
+          ref={(r) => (ref = r)}
+          fieldName="template"
+          value={template()}
+          isMultiline
+          onChange={(ev) => setTemplate(ev.currentTarget.value)}
+          class="font-mono text-xs"
+          onKeyDown={(ev) => onPromptKey(ev as any, () => setAutoOpen(true))}
+        />
+      </div>
+      <div class="flex justify-end gap-2"></div>
+    </RootModal>
+  )
 }

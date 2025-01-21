@@ -2,8 +2,7 @@ import './mode.scss'
 import { Component, JSX, Match, Show, Switch, createMemo } from 'solid-js'
 import Loading from '../Loading'
 import { settingStore, userStore } from '/web/store'
-import { getHeaderBg } from '/web/pages/Chat/helpers'
-import { usePane, useResizeObserver } from '../hooks'
+import { useCharacterBg, usePane, useRef, useResizeObserver, useWindowSize } from '../hooks'
 import Slot from '../Slot'
 
 export const ModeDetail: Component<{
@@ -21,6 +20,7 @@ export const ModeDetail: Component<{
   const cfg = settingStore()
   const user = userStore()
   const mode = usePane()
+  const size = useWindowSize()
 
   // createEffect(() => {
   //   chatStore.option('pane', props.showPane ? 'other' : undefined)
@@ -38,48 +38,52 @@ export const ModeDetail: Component<{
 
   const slots = useResizeObserver()
 
-  let slotContainer: HTMLDivElement
-
-  const header = createMemo(() => getHeaderBg(user.ui.mode))
+  const [slot, onSlot] = useRef()
+  const bgStyles = useCharacterBg('page')
 
   return (
     <>
       <Show when={props.loading}>
-        <div class="mt-24 w-full justify-center">
+        <div class="mt-24 flex w-full justify-center">
           <Loading />
         </div>
       </Show>
 
       <Show when={!props.loading}>
-        <section class="mode">
-          <header class="flex flex-col gap-2" style={{ 'grid-area': 'header' }}>
-            <div
-              class="hidden items-center justify-between rounded-md sm:flex"
-              classList={{ 'sm:flex': !!props.header }}
-              style={header()}
-            >
+        <section
+          class="mode pl-2 pr-2 sm:pl-2"
+          style={bgStyles()}
+          classList={{
+            'sm:pr-0': props.showPane,
+            'sm:pr-3': !props.showPane,
+          }}
+        >
+          <Show when={!!props.header || !cfg.config.tier?.disableSlots}>
+            <header class="flex w-full flex-col gap-2 pt-2" style={{ 'grid-area': 'header' }}>
               {props.header}
-            </div>
-            <div
-              ref={(ref) => {
-                slotContainer = ref
-                slots.load(ref)
-              }}
-              class="sticky top-0 flex h-fit w-full justify-center"
-              classList={{ hidden: cfg.config.tier?.disableSlots }}
-            >
-              <Switch>
-                <Match when={slots.size().w === 0}>{null}</Match>
-                <Match when={slotContainer!}>
-                  <Slot sticky="always" slot="leaderboard" parent={slotContainer!} />
-                </Match>
-              </Switch>
-            </div>
-          </header>
+
+              <div
+                ref={(ref) => {
+                  onSlot(ref)
+                  slots.load(ref)
+                }}
+                class="h-min-[100px] sticky top-0 -mt-[8px] flex w-[calc(100vw-16px)] max-w-[calc(100vw-16px)] justify-center overflow-x-hidden sm:w-full sm:max-w-none"
+                classList={{
+                  hidden: user.sub?.tier.disableSlots,
+                }}
+              >
+                <Switch>
+                  <Match when={slot()}>
+                    <Slot sticky="always" slot="leaderboard" parent={slot()} />
+                  </Match>
+                </Switch>
+              </div>
+            </header>
+          </Show>
 
           <section
             style={{ 'grid-area': 'content' }}
-            class="content my-2 flex w-full flex-row gap-1 overflow-y-auto"
+            class="content mb-2 flex w-full flex-row gap-1 overflow-y-auto"
             classList={{
               'justify-center': !props.showPane || mode() === 'popup',
               'justify-end gap-1 justify-self-center flex-row flex':
@@ -98,14 +102,14 @@ export const ModeDetail: Component<{
               </Show>
               <section
                 data-messages
-                class="mx-auto flex w-full flex-col-reverse overflow-y-auto"
+                class="mode-content flex w-full flex-col-reverse overflow-y-auto"
                 classList={{
                   // Chat Width
                   'w-full max-w-full': props.showPane || user.ui.chatWidth === 'full',
                   'w-full max-w-3xl': !props.showPane && user.ui.chatWidth === 'narrow',
                   // Chat Margin
                   'xs:mr-auto mx-auto': props.showPane,
-                  'mx-auto': !props.showPane,
+                  // 'mx-auto': !props.showPane,
                 }}
               >
                 {props.children}
@@ -127,9 +131,11 @@ export const ModeDetail: Component<{
             {props.footer}
           </footer>
           <section
-            class="pane ml-2 w-[480px] xl:w-[600px] "
+            class="pane ml-2 w-[480px] 2xl:w-[600px] "
             style={{ 'grid-area': 'pane' }}
-            classList={{ hidden: !props.showPane }}
+            classList={{
+              hidden: !size.pane() || !props.showPane,
+            }}
           >
             {props.pane}
           </section>

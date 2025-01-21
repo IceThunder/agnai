@@ -7,7 +7,7 @@ import { FileInputResult, getFileAsString } from '/web/shared/FileInput'
 import { NewCharacter, toastStore } from '/web/store'
 import { CHUB_URL } from '/web/store/chub'
 
-type ImportFormat = 'tavern' | 'tavernV2' | 'ooba' | 'agnai'
+type ImportFormat = 'tavern' | 'tavernV2' | 'ooba' | 'agnai' | 'charas'
 
 export const SUPPORTED_FORMATS = 'Agnaistic, CAI, TavernAI, TextGen, Pygmalion'
 
@@ -69,10 +69,11 @@ export function jsonToCharacter(json: any): NewCharacter {
   }
 
   if (format === 'tavern') {
+    const ext = json.extensions || {}
     return {
       name: json.name,
       greeting: json.first_mes,
-      appearance: json.extensions?.agnai?.appearance,
+      appearance: ext?.appearance,
       persona: {
         kind: 'text',
         attributes: {
@@ -85,6 +86,32 @@ export function jsonToCharacter(json: any): NewCharacter {
     }
   }
 
+  if (format === 'charas') {
+    const v2 = json.data || {}
+    const ext = v2.extensions || {}
+
+    return {
+      name: json.name,
+      description: json.description,
+      greeting: json.first_mes,
+      appearance: ext?.appearance,
+      creator: v2.creator,
+      persona: {
+        kind: 'text',
+        attributes: {
+          text: [[json.personality].filter((text) => !!text).join('\n')],
+        },
+      },
+      sampleChat: json.mes_example,
+      scenario: json.scenario,
+      originalAvatar: undefined,
+      systemPrompt: v2.system_prompt,
+      postHistoryInstructions: v2.post_history_instructions,
+      tags: Array.isArray(v2.tags) ? v2.tags : [],
+      alternateGreetings: Array.isArray(v2.alternate_greetings) ? v2.alternate_greetings : [],
+      extensions: ext,
+    }
+  }
   /**
    * format === 'tavernV2'
    * Tests, in the case we previously saved the lossless Agnai "Persona" data,
@@ -124,6 +151,7 @@ export function jsonToCharacter(json: any): NewCharacter {
     description: json.data.creator_notes,
     voice: json.data.extensions.agnai?.voice,
     insert: json.data.extensions.depth_prompt,
+    json: json.data.extensions.agnai?.json,
   }
 }
 
@@ -146,6 +174,7 @@ export async function downloadCharacterHub(path: string) {
 
 function getImportFormat(obj: any): ImportFormat {
   if (obj.kind === 'character' || isNativeCharacter(obj)) return 'agnai'
+  if (obj.extensions?.charas) return 'charas'
   if ('char_name' in obj) return 'ooba'
   if (obj.spec === 'chara_card_v2') return 'tavernV2'
   if ('mes_example' in obj) return 'tavern'

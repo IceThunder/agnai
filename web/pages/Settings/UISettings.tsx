@@ -6,7 +6,7 @@ import FileInput, { FileInputResult } from '../../shared/FileInput'
 import RangeInput from '../../shared/RangeInput'
 import Select from '../../shared/Select'
 import { createDebounce, toDropdownItems } from '../../shared/util'
-import { characterStore, userStore } from '../../store'
+import { characterStore, settingStore, userStore } from '../../store'
 import Message from '../Chat/components/Message'
 import { Toggle } from '../../shared/Toggle'
 import ColorPicker from '/web/shared/ColorPicker'
@@ -27,11 +27,13 @@ const msgInlineLabels: Record<UI.MessageOption, string> = {
   prompt: 'Prompt View',
   fork: 'Fork',
   trash: 'Delete',
+  'schema-regen': 'Retry Schema',
 }
 
-const UISettings: Component = () => {
+const UISettings: Component<{}> = () => {
   const state = userStore()
   const chars = characterStore()
+  const settings = settingStore()
 
   const themeBgOptions = createMemo(() => {
     const options = UI.BG_THEME.map((color) => ({ label: color as string, value: color as string }))
@@ -67,7 +69,6 @@ const UISettings: Component = () => {
       }
     }
 
-    console.log('updating', next)
     userStore.saveUI({ msgOptsInline: next })
   }
 
@@ -125,6 +126,7 @@ const UISettings: Component = () => {
         <div class="flex items-center gap-2">
           <Select
             fieldName="themeBg"
+            label="Background Color"
             items={themeBgOptions()}
             value={state.ui.themeBg}
             onChange={(item) => userStore.saveUI({ themeBg: item.value })}
@@ -170,26 +172,6 @@ const UISettings: Component = () => {
         <Show when={inline().length > 0}>
           <Sortable items={inline()} onChange={updateInline} />
         </Show>
-        <div class="flex flex-wrap gap-2 rounded-md">
-          {/* <For each={Object.entries(msgInlineOpts)}>
-            {([opt, label]) => (
-              <Button
-                size="sm"
-                schema={state.ui.msgOptsInline[opt as UI.MessageOption] ? 'green' : 'secondary'}
-                onClick={() =>
-                  userStore.saveUI({
-                    msgOptsInline: {
-                      ...state.ui.msgOptsInline,
-                      [opt]: !state.ui.msgOptsInline[opt as UI.MessageOption],
-                    },
-                  })
-                }
-              >
-                {label}
-              </Button>
-            )}
-          </For> */}
-        </div>
       </Card>
 
       <Toggle
@@ -200,8 +182,15 @@ const UISettings: Component = () => {
       />
 
       <Toggle
+        value={settings.anonymize}
+        label="Anonymize Chat"
+        helperText="Hide profile name in conversations. Typically for screenshots."
+        onChange={() => settingStore.toggleAnonymize()}
+      />
+
+      <Toggle
         fieldName="mobileSendOnEnter"
-        label="Send Message on Enter on Mobile"
+        label="Send on Enter on Mobile"
         helperText='Instead of adding a line break, "Enter" will send the message (Mobile only)'
         value={state.ui.mobileSendOnEnter}
         onChange={(ev) => userStore.saveUI({ mobileSendOnEnter: ev })}
@@ -223,11 +212,16 @@ const UISettings: Component = () => {
             <b>Standard</b>: Messages take up the entire chat screen.
             <br />
             <b>Split</b>: Character's avatar appears at the top of the screen
+            <br />
+            <b>Background</b>: Character's avatar will become the Chat Background
           </>
         }
         items={[
           { label: 'Standard', value: 'standard' },
           { label: 'Split', value: 'split' },
+          { label: 'Background: Auto', value: 'background' },
+          { label: 'Background: Cover', value: 'background-cover' },
+          { label: 'Background: Contain', value: 'background-contain' },
         ]}
         value={state.ui.viewMode || 'standard'}
         onChange={(next) => userStore.saveUI({ viewMode: next.value as any })}
@@ -395,8 +389,9 @@ const UISettings: Component = () => {
       <Divider />
       <div class="text-lg font-bold">Preview</div>
       <Show when={chars.characters.list.length > 0}>
-        <div class="bg-100 flex w-full flex-col gap-2 rounded-md p-2">
+        <div class="bg-600 flex w-full flex-col gap-2 rounded-md p-2">
           <Message
+            index={-1}
             editing={false}
             msg={toBotMsg(
               chars.characters.list[0],
@@ -412,6 +407,7 @@ const UISettings: Component = () => {
 
           <Show when={state.profile}>
             <Message
+              index={-1}
               editing={false}
               msg={toUserMsg(
                 state.profile!,

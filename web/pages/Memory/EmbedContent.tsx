@@ -1,5 +1,4 @@
-import { Component, Match, Switch, createSignal } from 'solid-js'
-import { getStrictForm } from '/web/shared/util'
+import { Component, Match, Show, Switch, createSignal } from 'solid-js'
 import { toastStore } from '/web/store/toasts'
 import TextInput from '/web/shared/TextInput'
 import Button from '/web/shared/Button'
@@ -8,24 +7,31 @@ import Divider from '/web/shared/Divider'
 import { slugify } from '/common/util'
 import { embedApi } from '/web/store/embeddings'
 import Select from '/web/shared/Select'
+import { getStore } from '/web/store/create'
+import { SolidCard } from '/web/shared/Card'
+import { settingStore } from '/web/store'
+import { createStore } from 'solid-js/store'
 
 export { EmbedContent as default }
 
 const EmbedContent: Component = (props) => {
-  let ref: any
+  const user = getStore('user')()
 
   const options = ['Article', 'PDF', 'Text file', 'Plain Text']
-  const [type, setType] = createSignal(options[0])
+  const [store, setStore] = createStore({
+    wiki: '',
+    embedName: '',
+    embedText: '',
+    type: options[0],
+  })
 
   const [loading, setLoading] = createSignal(false)
-  const [filename, setFilename] = createSignal('')
   const [file, setFile] = createSignal<File>()
 
   const embedWiki = async () => {
     setLoading(true)
     try {
-      const { wiki } = getStrictForm(ref, { wiki: 'string' })
-      await embedApi.embedArticle(wiki)
+      await embedApi.embedArticle(store.wiki)
       toastStore.success('Successfully created embedding')
       setLoading(false)
     } finally {
@@ -36,17 +42,15 @@ const EmbedContent: Component = (props) => {
   const embedFile = async () => {
     setLoading(true)
     try {
-      const { embedName } = getStrictForm(ref, { embedName: 'string' })
-      const embedType = type()
-      const docNeeded = embedType === 'PDF' || embedType === 'Text file'
+      const docNeeded = store.type === 'PDF' || store.type === 'Text file'
       const doc = file()
       if (!doc && docNeeded) {
         toastStore.error(`No PDF loaded`)
         return
       }
 
-      const slug = slugify(embedName)
-      switch (embedType) {
+      const slug = slugify(store.embedName)
+      switch (store.type) {
         case 'PDF':
           await embedApi.embedPdf(slug, doc!)
           break
@@ -56,12 +60,11 @@ const EmbedContent: Component = (props) => {
           break
 
         case 'Plain Text': {
-          const { embedText } = getStrictForm(ref, { embedText: 'string' })
-          if (!embedText) {
+          if (!store.embedText) {
             toastStore.warn(`Embedding content is empty`)
             return
           }
-          await embedApi.embedPlainText(slug, embedText)
+          await embedApi.embedPlainText(slug, store.embedText)
           break
         }
       }
@@ -75,44 +78,56 @@ const EmbedContent: Component = (props) => {
     const file = files[0]
     if (!file) {
       setFile()
-      setFilename('')
+      setStore('embedName', '')
       return
     }
 
     setFile(() => file.file)
     const dot = file.file.name.lastIndexOf('.')
     const name = dot > -1 ? file.file.name.slice(0, dot) : file.file.name
-    setFilename(slugify(name))
+    setStore('embedName', slugify(name))
   }
 
   return (
-    <form ref={ref} class="flex flex-col gap-2">
+    <form class="flex flex-col gap-2">
+      <Show when={user.user?.disableLTM ?? true}>
+        <SolidCard bg="premium-700">
+          You need need to enable{' '}
+          <b class="underline hover:cursor-pointer" onClick={() => settingStore.modal(true)}>
+            Embeddings/Long-Term Memory
+          </b>{' '}
+          in your Settings
+        </SolidCard>
+      </Show>
+
       <Select
         items={options.map((value) => ({ label: `Embed: ${value}`, value }))}
         fieldName="embed-type"
-        value={type()}
-        onChange={(ev) => setType(ev.value)}
+        value={store.type}
+        onChange={(ev) => setStore('type', ev.value)}
       />
 
       <Switch>
-        <Match when={type() === 'Article'}>
+        <Match when={store.type === 'Article'}>
           <TextInput
-            fieldName="wiki"
             label="Embed Wikipedia Article"
             helperText="Create an embedding using the content from a Wikipedia article"
             placeholder="URL. E.g. https://en.wikipedia.org/wiki/Taylor_Swift"
+            value={store.wiki}
+            onChange={(ev) => setStore('wiki', ev.currentTarget.value)}
           />
           <Button class="mt-2 w-fit" disabled={loading()} onClick={embedWiki}>
             Embed Article
           </Button>
         </Match>
 
-        <Match when={type() === 'PDF'}>
+        <Match when={store.type === 'PDF'}>
           <TextInput
             fieldName="embedName"
             label="Name"
             helperText='(Optional) An identifier for your embedding. This will become a "slug". E.g. "Hello World" will become "hello-world"'
-            value={filename()}
+            value={store.embedName}
+            onChange={(ev) => setStore('embedName', ev.currentTarget.value)}
           />
 
           <FileInput
@@ -127,12 +142,13 @@ const EmbedContent: Component = (props) => {
           </Button>
         </Match>
 
-        <Match when={type() === 'Text file'}>
+        <Match when={store.type === 'Text file'}>
           <TextInput
             fieldName="embedName"
             label="Name"
             helperText='(Optional) An identifier for your embedding. This will become a "slug". E.g. "Hello World" will become "hello-world"'
-            value={filename()}
+            value={store.embedName}
+            onChange={(ev) => setStore('embedName', ev.currentTarget.value)}
           />
 
           <FileInput
@@ -147,12 +163,13 @@ const EmbedContent: Component = (props) => {
           </Button>
         </Match>
 
-        <Match when={type() === 'Plain Text'}>
+        <Match when={store.type === 'Plain Text'}>
           <TextInput
             fieldName="embedName"
             label="Name"
             helperText='An identifier for your embedding. This will become a "slug". E.g. "Hello World" will become "hello-world"'
-            value={filename()}
+            value={store.embedName}
+            onChange={(ev) => setStore('embedName', ev.currentTarget.value)}
           />
 
           <TextInput
@@ -160,6 +177,7 @@ const EmbedContent: Component = (props) => {
             label="Content"
             helperText="The content to be embedded. Use line breaks to seperate lines."
             isMultiline
+            onChange={(ev) => setStore('embedText', ev.currentTarget.value)}
           />
 
           <Button class="mt-2 w-fit" onClick={embedFile}>

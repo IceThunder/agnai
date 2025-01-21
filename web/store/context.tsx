@@ -3,16 +3,17 @@ import { createStore } from 'solid-js/store'
 import { characterStore } from './character'
 import { settingStore } from './settings'
 import { chatStore } from './chat'
-import { AppSchema } from '/common/types'
+import { AppSchema, UI } from '/common/types'
 import { userStore } from './user'
 import { toMap } from '../shared/util'
 import { getActiveBots } from '../pages/Chat/util'
 import { FeatureFlags } from './flags'
 import { distinct } from '/common/util'
-import { PresetInfo, getClientPreset } from '../shared/adapter'
 import { getRgbaFromVar } from '../shared/colors'
-import { msgStore } from './message'
+import { MsgState, msgStore } from './message'
 import { ChatTree } from '/common/chat'
+import { presetStore } from './presets'
+import { getChatPreset } from '/common/prompt'
 
 export type ContextState = {
   tooltip?: string | JSX.Element
@@ -36,12 +37,14 @@ export type ContextState = {
 
   handle: string
   impersonate?: AppSchema.Character
+  user?: AppSchema.User
   profile?: AppSchema.Profile
   flags: FeatureFlags
   char?: AppSchema.Character
   chat?: AppSchema.Chat
   replyAs?: string
   trimSentences: boolean
+  config: AppSchema.AppConfig
   bg: {
     bot: JSX.CSSProperties
     user: JSX.CSSProperties
@@ -49,7 +52,10 @@ export type ContextState = {
   }
   promptHistory: any
   chatTree: ChatTree
-  info?: PresetInfo
+  waiting?: MsgState['waiting']
+  status?: MsgState['hordeStatus']
+  preset?: AppSchema.UserGenPreset
+  ui: UI.UISettings
 }
 
 const initial: ContextState = {
@@ -70,6 +76,8 @@ const initial: ContextState = {
   },
   promptHistory: {},
   chatTree: {},
+  ui: {} as any,
+  config: {} as any,
 }
 
 const AppContext = createContext([initial, (next: Partial<ContextState>) => {}] as const)
@@ -82,6 +90,7 @@ export function ContextProvider(props: { children: any }) {
   const users = userStore()
   const cfg = settingStore()
   const msgs = msgStore()
+  const presets = presetStore()
 
   const visuals = createMemo(() => {
     const botBackground = getRgbaFromVar(
@@ -118,7 +127,7 @@ export function ContextProvider(props: { children: any }) {
     const curr = chars.chatChars.map
     const temps = chats.active?.chat.tempCharacters || {}
 
-    const active = getActiveBots(chats.active.chat, { ...curr, ...temps, ...chars.characters.map })
+    const active = getActiveBots(chats.active.chat, { ...temps, ...chars.characters.map, ...curr })
     return distinct(active)
   })
 
@@ -128,12 +137,22 @@ export function ContextProvider(props: { children: any }) {
     return impersonate || handle || 'You'
   })
 
+  const preset = createMemo(() => {
+    if (!chats.active?.chat || !users.user) return
+    const match = getChatPreset(
+      chats.active.chat,
+      users.user,
+      presets.presets
+    ) as AppSchema.UserGenPreset
+    return match
+  })
+
   createEffect(() => {
-    const info = getClientPreset(chats.active?.chat)
     const next: Partial<ContextState> = {
       bg: visuals(),
       flags: cfg.flags,
       anonymize: cfg.anonymize,
+      config: cfg.config,
       tempMap: chats.active?.chat.tempCharacters || {},
 
       allBots: allBots(),
@@ -145,12 +164,16 @@ export function ContextProvider(props: { children: any }) {
       char: chats.active?.char,
       chat: chats.active?.chat,
       replyAs: chats.active?.replyAs,
+      user: users.user,
       profile: users.profile,
       handle: handle(),
       trimSentences: users.ui.trimSentences ?? false,
       promptHistory: chats.promptHistory,
-      info,
       chatTree: msgs.graph.tree,
+      waiting: msgs.waiting,
+      status: msgs.hordeStatus,
+      preset: preset(),
+      ui: users.ui,
     }
 
     setState(next)

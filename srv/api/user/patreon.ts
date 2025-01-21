@@ -4,8 +4,10 @@ import { StatusError } from '../wrap'
 import { AppSchema, Patreon } from '/common/types'
 import { getCachedTiers } from '/srv/db/subscriptions'
 import { store } from '/srv/db'
-import { publishOne } from '../ws/handle'
 import { command } from '/srv/domains'
+import { sendOne } from '../ws'
+import { getPatreonEntitledTierByCost } from '/common/util'
+import { logger } from '/srv/middleware'
 
 export const patreon = {
   authorize,
@@ -34,6 +36,10 @@ async function authorize(code: string, refresh?: boolean) {
   })
 
   if (result.statusCode && result.statusCode > 200) {
+    logger.error(
+      { result: result.body, status: result.statusCode, message: result.statusMessage },
+      'Patreon validation failed'
+    )
     throw new StatusError(`Unable to verify Patreon account`, 400)
   }
 
@@ -44,6 +50,7 @@ async function authorize(code: string, refresh?: boolean) {
 const memberProps = [
   'patron_status',
   'last_charge_date',
+  'is_gifted',
   'last_charge_status',
   'next_charge_date',
   'currently_entitled_amount_cents',
@@ -76,14 +83,14 @@ async function identity(token: string) {
   const tiers: Patreon.Tier[] =
     identity.body.included?.filter((obj: Patreon.Include) => {
       if (obj.type !== 'tier') return false
-      return obj.relationships.campaign?.data?.id === config.patreon.campaign_id
+      return obj.relationships?.campaign?.data?.id === config.patreon.campaign_id
     }) || []
 
   const tier = tiers.length
-    ? tiers.reduce((prev, curr) => {
+    ? tiers.reduce<Patreon.Tier | undefined>((prev, curr) => {
         if (!prev) return curr
         return curr.attributes.amount_cents > prev.attributes.amount_cents ? curr : prev
-      })
+      }, undefined)
     : undefined
 
   if (!tier) return { user }
@@ -94,22 +101,16 @@ async function identity(token: string) {
     return match
   })
 
-  const contrib = tier.attributes.amount_cents
-  const sub = getCachedTiers().reduce((prev, curr) => {
-    if (!curr.enabled || curr.deletedAt) return prev
-    if (!curr.patreon?.tierId) return prev
-    if (curr.patreon.cost > contrib) return prev
-
-    if (!prev) return curr
-    if (prev.patreon?.cost! > curr.patreon.cost) return prev
-    return curr
-  })
+  let contrib = tier.attributes.amount_cents
+  if (!contrib) {
+  }
+  const sub = getPatreonEntitledTierByCost(contrib, getCachedTiers())
 
   return { tier, sub, user, member }
 }
 
-async function revalidatePatron(userId: string) {
-  const user = await store.users.getUser(userId)
+async function revalidatePatron(userId: string | AppSchema.User) {
+  const user = typeof userId === 'string' ? await store.users.getUser(userId) : userId
   if (!user?.patreon) {
     throw new StatusError(`Patreon account is not linked`, 400)
   }
@@ -125,15 +126,15 @@ async function revalidatePatron(userId: string) {
       ...token,
       expires: new Date(Date.now() + token.expires_in * 1000).toISOString(),
     }
-    await store.users.updateUser(userId, { patreon: next })
+    await store.users.updateUser(user._id, { patreon: next })
     user.patreon = next
   }
 
   const patron = await identity(user.patreon.access_token)
 
   const existing = await store.users.findByPatreonUserId(patron.user.id)
-  if (existing && existing._id !== userId) {
-    publishOne(userId, {
+  if (existing && existing._id !== user._id) {
+    sendOne(user._id, {
       type: 'notification',
       level: 'warn',
       message:
@@ -141,10 +142,10 @@ async function revalidatePatron(userId: string) {
       ttl: 20,
     })
 
-    await store.users.unlinkPatreonAccount(existing._id, `attributing to user ${userId}`)
+    await store.users.unlinkPatreonAccount(existing._id, `attributing to user ${user._id}`)
   }
 
-  const next = await store.users.updateUser(userId, {
+  const next = await store.users.updateUser(user._id, {
     patreon: {
       ...user.patreon,
       user: patron.user,
@@ -154,7 +155,7 @@ async function revalidatePatron(userId: string) {
     },
     patreonUserId: patron.user.id,
   })
-  await command.patron.link(patron.user.id, { userId })
+  await command.patron.link(patron.user.id, { userId: user._id })
   return next
 }
 

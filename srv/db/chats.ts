@@ -17,6 +17,7 @@ export async function getChat(id: string) {
   if (!chat) return
 
   const charIds = Object.keys(chat.characters || {})
+
   const characters = await db('character')
     .find({ _id: { $in: charIds.concat(chat.characterId) } })
     .toArray()
@@ -39,7 +40,10 @@ export async function getMessageAndChat(msgId: string) {
 }
 
 export async function update(id: string, props: PartialUpdate<AppSchema.Chat>) {
-  await db('chat').updateOne({ _id: id }, { $set: { ...props, updatedAt: now() } as any })
+  await db('chat').updateOne(
+    { _id: id },
+    { $set: { ...props, updatedAt: props.updatedAt || now() } as any }
+  )
   return getChatOnly(id)
 }
 
@@ -57,6 +61,7 @@ export async function create(
     | 'genPreset'
     | 'mode'
     | 'imageSource'
+    | 'treeLeafId'
   >,
   profile: AppSchema.Profile,
   impersonating?: AppSchema.Character
@@ -86,6 +91,7 @@ export async function create(
     messageCount: props.greeting ? 1 : 0,
     tempCharacters: {},
     imageSource: props.imageSource,
+    treeLeafId: props.treeLeafId,
   }
 
   await db('chat').insertOne(doc)
@@ -96,6 +102,7 @@ export async function create(
       char,
       impersonate: impersonating,
       sender: profile,
+      jsonValues: {},
     })
     const msg: AppSchema.ChatMessage = {
       kind: 'chat-message',
@@ -184,6 +191,7 @@ export async function getAllChats(userId: string) {
             createdAt: 1,
             updatedAt: 1,
             messageCount: 1,
+            genPreset: 1,
             'character.name': 1,
           },
         },
@@ -263,6 +271,7 @@ export async function restartChat(
     chat,
     sender: profile,
     impersonate,
+    jsonValues: {},
   })
 
   await db('chat-message').insertOne({

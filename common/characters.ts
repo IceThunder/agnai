@@ -8,8 +8,7 @@ export const defaultChars = {
       kind: 'attributes',
       attributes: {
         species: ['robot'],
-        mind: ['kind', 'compassionate', 'caring', 'tender', 'forgiving', 'enthusiastic'],
-        personality: ['kind', 'compassionate', 'caring', 'tender', 'forgiving', 'enthusiastic'],
+        personality: ['kind, compassionate, caring, tender, forgiving, enthusiastic'],
       },
     },
     sampleChat:
@@ -70,6 +69,8 @@ export function exportCharacter(char: AppSchema.Character, target: 'tavern' | 'o
               voice: char.voice,
               persona: char.persona,
               appearance: char.appearance,
+              json: char.json,
+              sprite: char.sprite,
             },
           },
         },

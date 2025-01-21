@@ -4,9 +4,9 @@ import {
   createEffect,
   createMemo,
   createSignal,
+  For,
   Index,
   onCleanup,
-  onMount,
   Show,
 } from 'solid-js'
 import { useNavigate, useParams } from '@solidjs/router'
@@ -22,7 +22,7 @@ import { devCycleAvatarSettings, isDevCommand } from './dev-util'
 import ForcePresetModal from './ForcePreset'
 import DeleteChatModal from './components/DeleteChat'
 import { useEffect, usePaneManager } from '/web/shared/hooks'
-import { emptyMsg, InfiniteScroll, insertImageMessages, SwipeMessage } from './helpers'
+import { emptyMsg, LoadMore, insertImageMessages, SwipeMessage } from './helpers'
 import { useAutoExpression } from '/web/shared/Avatar/hooks'
 import AvatarContainer from '/web/shared/Avatar/Container'
 import { eventStore } from '/web/store/event'
@@ -30,11 +30,14 @@ import ChatPanes, { useValidChatPane } from './components/ChatPanes'
 import { useAppContext } from '/web/store/context'
 import { embedApi } from '/web/store/embeddings'
 import { ModeDetail } from '/web/shared/Mode/Detail'
-import { ChatHeader } from './ChatHeader'
+import { ChatMenu } from './ChatMenu'
 import { ChatFooter } from './ChatFooter'
 import { ConfirmModal } from '/web/shared/Modal'
 import { TitleCard } from '/web/shared/Card'
 import { ChatGraphModal } from './components/GraphModal'
+import { EVENTS, events } from '/web/emitter'
+import { AppSchema } from '/common/types'
+import { canStartTour, startTour } from '/web/tours'
 
 export { ChatDetail as default }
 
@@ -110,7 +113,6 @@ const ChatDetail: Component = () => {
   const [removeId, setRemoveId] = createSignal('')
 
   const [showHiddenEvents, setShowHiddenEvents] = createSignal(false)
-  const [linesAddedCount, setLinesAddedCount] = createSignal<number | undefined>(undefined)
 
   const chatMsgs = createMemo(() => {
     const self = user.profile
@@ -121,7 +123,9 @@ const ChatDetail: Component = () => {
         }
 
         const handle = ctx.allBots[msg.characterId] || ctx.tempMap[msg.characterId]
-        return { ...msg, handle: handle?.name }
+        if (handle) {
+          return { ...msg, handle: handle?.name || msg.handle }
+        }
       }
 
       if (msg.userId) {
@@ -144,14 +148,9 @@ const ChatDetail: Component = () => {
     })
   })
 
-  onMount(() => {
-    chatStore.computePrompt(msgs.msgs[msgs.msgs.length - 1], false)
-    setLinesAddedCount(chats.linesAddedCount)
-  })
-
-  const firstInsertedMsgIndex = createMemo(() => {
-    const linesAdded = linesAddedCount()
-    if (linesAdded) return chatMsgs().length - 1 - linesAdded
+  onCleanup(() => {
+    sticky.clear()
+    events.emit('chat-closed')
   })
 
   createEffect(() => {
@@ -199,14 +198,33 @@ const ChatDetail: Component = () => {
     const char = charId ? ctx.allBots[charId] : undefined
 
     const handle = msgs.waiting.mode !== 'self' ? char?.name : profile?.handle
-    return emptyMsg({
-      id: 'partial',
-      charId: msgs.waiting?.mode !== 'self' ? msgs.waiting.characterId : undefined,
-      userId: msgs.waiting?.mode === 'self' ? msgs.waiting.userId || user.user?._id : undefined,
-      message: msgs.partial || '',
-      adapter: 'partial',
-      handle: handle || 'You',
-    })
+
+    const waitingMsgs: AppSchema.ChatMessage[] = []
+
+    if (msgs.waiting.input) {
+      waitingMsgs.push(
+        emptyMsg({
+          id: 'partial-input',
+          charId: ctx.impersonate?._id,
+          userId: user.user?._id,
+          message: msgs.waiting.input || '',
+          handle: ctx.impersonate?.name || profile?.handle || 'You',
+        })
+      )
+    }
+
+    waitingMsgs.push(
+      emptyMsg({
+        id: 'partial-response',
+        charId: msgs.waiting?.mode !== 'self' ? msgs.waiting.characterId : ctx.impersonate?._id,
+        userId: msgs.waiting?.mode === 'self' ? msgs.waiting.userId || user.user?._id : undefined,
+        message: msgs.partial || '',
+        adapter: 'partial-response',
+        handle: handle || 'You',
+      })
+    )
+
+    return waitingMsgs
   })
 
   const clearModal = () => {
@@ -228,7 +246,6 @@ const ChatDetail: Component = () => {
 
   createEffect(() => {
     if (!msgs.inference) return
-    if (!ctx.info) return
 
     // express.classify(opts.preset, msgs.inference.text)
     msgStore.clearLastInference()
@@ -243,8 +260,18 @@ const ChatDetail: Component = () => {
       return nav(`/chat/${chats.lastId}`)
     }
 
+    if (charName && canStartTour('chat')) {
+      settingStore.menu(true)
+      setTimeout(() => {
+        startTour('chat')
+      }, 500)
+    }
+
+    events.emit(EVENTS.chatOpened, params.id)
     if (params.id !== chats.chat?._id) {
-      chatStore.getChat(params.id)
+      chatStore.openChat(params.id)
+    } else {
+      characterStore.loadImpersonate()
     }
   })
 
@@ -356,6 +383,11 @@ const ChatDetail: Component = () => {
         ev.preventDefault()
         chatStore.option({ options: false, modal: 'graph' })
       }
+
+      if (ev.key === 'p') {
+        ev.preventDefault()
+        msgStore.createImage()
+      }
     }
 
     document.addEventListener('keydown', keyboardShortcuts)
@@ -393,12 +425,10 @@ const ChatDetail: Component = () => {
     )
   })
 
-  onCleanup(sticky.clear)
-
   return (
     <>
+      <ChatMenu ctx={ctx} isOwner={isOwner()} />
       <ModeDetail
-        header={<ChatHeader ctx={ctx} isOwner={isOwner()} />}
         footer={
           <ChatFooter
             ctx={ctx}
@@ -417,7 +447,7 @@ const ChatDetail: Component = () => {
       >
         <section
           data-messages
-          class={`mx-auto flex w-full flex-col-reverse gap-4 overflow-y-auto`}
+          class={`chat-messages flex w-full flex-col-reverse gap-4 overflow-y-auto`}
           ref={sticky.monitor}
         >
           <div id="chat-messages" class="flex w-full flex-col gap-2">
@@ -433,12 +463,13 @@ const ChatDetail: Component = () => {
               </div>
             </Show>
             {/* Original Slot location */}
-            <InfiniteScroll canFetch={chars.ready} />
+            <LoadMore canFetch={chars.ready} />
 
             <Index each={chatMsgs()}>
               {(msg, i) => (
                 <>
                   <Message
+                    index={i}
                     msg={msg()}
                     editing={chats.opts.editing}
                     last={i === indexOfLastRPMessage()}
@@ -458,7 +489,6 @@ const ChatDetail: Component = () => {
                     voice={
                       msg()._id === msgs.speaking?.messageId ? msgs.speaking.status : undefined
                     }
-                    firstInserted={i === firstInsertedMsgIndex()}
                   >
                     {isOwner() && retries()?.list?.length! > 1 && i === indexOfLastRPMessage() && (
                       <SwipeMessage
@@ -473,14 +503,20 @@ const ChatDetail: Component = () => {
                 </>
               )}
             </Index>
-            <Show when={waitingMsg()}>
-              <Message
-                msg={waitingMsg()!}
-                onRemove={() => {}}
-                editing={chats.opts.editing}
-                sendMessage={sendMessage}
-                isPaneOpen={pane.showing()}
-              />
+            <Show when={waitingMsg()?.length}>
+              <For each={waitingMsg()}>
+                {(msg) => (
+                  <Message
+                    index={-1}
+                    msg={msg}
+                    onRemove={() => {}}
+                    editing={false}
+                    sendMessage={sendMessage}
+                    isPaneOpen={pane.showing()}
+                    partial={msg._id === 'partial-response' ? msg.msg : ''}
+                  />
+                )}
+              </For>
             </Show>
           </div>
         </section>
@@ -527,12 +563,12 @@ const ChatDetail: Component = () => {
             <div>This will fork your conversation from the greeting message.</div>
           </TitleCard>
         }
-        show={chats.opts.confirm}
+        show={chats.opts.modal === 'restart'}
         confirm={() => {
           msgStore.fork('root')
-          chatStore.option({ confirm: false })
+          chatStore.option({ modal: 'none' })
         }}
-        close={() => chatStore.option({ confirm: false })}
+        close={() => chatStore.option({ modal: 'none' })}
       />
     </>
   )

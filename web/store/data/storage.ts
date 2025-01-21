@@ -81,6 +81,7 @@ const fallbacks: { [key in StorageKey]: LocalStorage[key] } = {
   presets: [],
   config: {
     _id: 'anon',
+    disableLTM: true,
     admin: false,
     hash: '',
     kind: 'user',
@@ -148,7 +149,7 @@ export async function handleGuestInit() {
     }
   }
 
-  const entities = await getGuestInitEntities()
+  const entities = await getGuestInitEntities(cfg.result!)
   return localApi.result({
     ...entities,
     config: cfg.result!,
@@ -168,7 +169,7 @@ async function migrateToJson() {
   return entities
 }
 
-async function getGuestInitEntities() {
+async function getGuestInitEntities(config?: AppSchema.AppConfig) {
   await migrateLegacyItems()
   /**
    * @TODO Should we do this in parallel ?
@@ -180,6 +181,37 @@ async function getGuestInitEntities() {
   const scenario = await localApi.loadItem('scenario', true)
   const characters = await localApi.loadItem('characters', true)
   const chats = await localApi.loadItem('chats', true)
+
+  if (!presets.length && config?.subs.length) {
+    const model = config.subs.find((s) => s.preset.isDefaultSub)
+    if (model) {
+      const preset: AppSchema.UserGenPreset = {
+        ...model?.preset,
+        service: model?.service,
+        _id: v4(),
+        name: 'My Preset',
+        kind: 'gen-setting',
+        userId: 'anon',
+        presetMode: 'simple',
+        useMaxContext: true,
+        temp: 0.75,
+        maxContextLength: 8 * 1024,
+        maxTokens: 350,
+        minP: 0.05,
+        useAdvancedPrompt: 'basic',
+        registered: {
+          agnaistic: {
+            subscriptionId: model._id,
+          },
+        },
+      }
+      presets.push(preset)
+
+      user.defaultPreset = preset._id
+      await savePresets(presets)
+      await saveConfig(user)
+    }
+  }
 
   let fixed = false
   for (const chat of chats) {
@@ -223,7 +255,6 @@ async function migrateLegacyItems() {
 
     await saveItem(key, old)
     localStorage.removeItem(key)
-    console.log('Migrated', key)
   }
 
   for (const key in localStorage) {
@@ -234,7 +265,6 @@ async function migrateLegacyItems() {
 
     await storage.setItem(key, data)
     localStorage.removeItem(key)
-    console.log('Migrated', key)
   }
 }
 
@@ -243,7 +273,7 @@ export async function saveMessages(chatId: string, messages: AppSchema.ChatMessa
   if (SELF_HOSTING) {
     return api.post(`/json/messages/${chatId}`, messages)
   } else {
-    storage.setItem(key, JSON.stringify(messages))
+    await storage.setItem(key, JSON.stringify(messages))
   }
 }
 
@@ -334,7 +364,7 @@ export async function loadItem<TKey extends keyof typeof KEYS>(
     }
 
     const fallback = fallbacks[key]
-    storage.setItem(key, JSON.stringify(fallback))
+    await storage.setItem(key, JSON.stringify(fallback))
 
     return fallback
   }

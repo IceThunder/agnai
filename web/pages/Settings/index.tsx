@@ -1,30 +1,23 @@
-import { Component, createMemo, createSignal, onMount } from 'solid-js'
+import { Component, createEffect, createMemo, createSignal, on, onMount } from 'solid-js'
 import { AlertTriangle, Save } from 'lucide-solid'
 import Button from '../../shared/Button'
 import PageHeader from '../../shared/PageHeader'
-import {
-  applyDotProperty,
-  getFormEntries,
-  getStrictForm,
-  setComponentPageTitle,
-} from '../../shared/util'
+import { setComponentPageTitle } from '../../shared/util'
 import { settingStore, userStore } from '../../store'
 import UISettings from './UISettings'
 import Tabs from '../../shared/Tabs'
 import AISettings from './AISettings'
 import { Show } from 'solid-js'
-import { ImageSettings } from './Image/ImageSettings'
 import { VoiceSettings } from './Voice/VoiceSettings'
-import { toArray } from '/common/util'
 import { useSearchParams } from '@solidjs/router'
-import Modal from '/web/shared/Modal'
-import { THIRDPARTY_FORMATS } from '/common/adapters'
+import { RootModal } from '/web/shared/Modal'
 import { SubscriptionPage } from '../Profile/SubscriptionPage'
+import { Page } from '/web/Layout'
+import { createStore } from 'solid-js/store'
 
 const settingTabs: Record<Tab, string> = {
   ai: 'AI Settings',
   ui: 'UI Settings',
-  image: 'Image Settings',
   voice: 'Voice Settings',
   guest: 'Guest Data',
   subscription: 'Subscription',
@@ -33,10 +26,9 @@ const settingTabs: Record<Tab, string> = {
 enum MainTab {
   ai = 0,
   ui = 1,
-  image = 2,
-  voice = 3,
-  guest = 4,
-  subscription = 5,
+  voice = 2,
+  guest = 3,
+  subscription = 4,
 }
 
 type Tab = keyof typeof MainTab
@@ -45,7 +37,7 @@ export const SettingsModal = () => {
   const state = settingStore()
   const [footer, setFooter] = createSignal<any>()
   return (
-    <Modal
+    <RootModal
       show={state.showSettings}
       close={() => settingStore.modal(false)}
       fixedHeight
@@ -53,27 +45,35 @@ export const SettingsModal = () => {
       footer={
         <>
           <Button schema="secondary" onClick={() => settingStore.modal(false)}>
-            Cancel
+            Close
           </Button>
           {footer()}
         </>
       }
     >
       <Settings footer={setFooter} />
-    </Modal>
+    </RootModal>
   )
 }
 
 const Settings: Component<{ footer?: (children: any) => void }> = (props) => {
-  let formRef: HTMLFormElement
-
   setComponentPageTitle('Settings')
-  const state = userStore()
+  const user = userStore()
 
   const [query, setQuery] = useSearchParams()
   const [tab, setTab] = createSignal<number>(+(query.tab ?? '0'))
-  const [workers, setWorkers] = createSignal<string[]>(toArray(state.user?.hordeWorkers))
-  const [models, setModels] = createSignal<string[]>(toArray(state.user?.hordeModel))
+
+  const [store, setStore] = createStore(user.user!)
+
+  createEffect(
+    on(
+      () => user.user,
+      (next) => {
+        if (!next) return
+        setStore(next)
+      }
+    )
+  )
 
   onMount(() => {
     if (!query.tab) {
@@ -81,97 +81,18 @@ const Settings: Component<{ footer?: (children: any) => void }> = (props) => {
     }
   })
 
-  const tabs: Tab[] = ['ai', 'ui', 'image', 'voice']
+  const tabs: Tab[] = ['ai', 'ui', 'voice']
 
-  if (state.loggedIn && (state.tiers.length > 0 || state.user?.billing)) {
+  if (user.tiers.length > 0 || user.user?.billing) {
     tabs.push('subscription')
   }
 
-  if (!state.loggedIn) tabs.push('guest')
+  if (!user.loggedIn) tabs.push('guest')
 
   const currentTab = createMemo(() => tabs[tab()])
 
   const onSubmit = () => {
-    const adapterConfig = getAdapterConfig(getFormEntries(formRef))
-    const body = getStrictForm(formRef, settingsForm)
-
-    const {
-      imageCfg,
-      imageSteps,
-      imageType,
-      imageClipSkip,
-      imageWidth,
-      imageHeight,
-      imageNegative,
-      imagePrefix,
-      imageSuffix,
-
-      sdSampler,
-      agnaiModel = '',
-      agnaiSampler = '',
-      sdUrl,
-      hordeImageModel,
-      hordeSampler,
-      novelImageModel,
-      novelSampler,
-
-      speechToTextEnabled,
-      speechToTextAutoSubmit,
-      speechToTextAutoRecord,
-
-      textToSpeechEnabled,
-      textToSpeechFilterActions,
-
-      elevenLabsApiKey,
-
-      summariseChat,
-      summaryPrompt,
-
-      ...base
-    } = body
-
-    userStore.updateConfig({
-      ...base,
-      adapterConfig,
-      hordeWorkers: workers(),
-      hordeModels: models(),
-      speechtotext: {
-        enabled: speechToTextEnabled,
-        autoSubmit: speechToTextAutoSubmit,
-        autoRecord: speechToTextAutoRecord,
-      },
-      elevenLabsApiKey,
-      texttospeech: {
-        enabled: textToSpeechEnabled,
-        filterActions: textToSpeechFilterActions,
-      },
-      images: {
-        type: imageType,
-        cfg: imageCfg,
-        clipSkip: imageClipSkip,
-        height: imageHeight,
-        width: imageWidth,
-        steps: imageSteps,
-        negative: imageNegative,
-        prefix: imagePrefix,
-        suffix: imageSuffix,
-        summariseChat,
-        summaryPrompt,
-        horde: {
-          sampler: hordeSampler,
-          model: hordeImageModel || '',
-        },
-        novel: {
-          model: novelImageModel,
-          sampler: novelSampler,
-        },
-        sd: {
-          sampler: sdSampler,
-          url: sdUrl,
-        },
-        agnai: { model: agnaiModel || '', sampler: agnaiSampler || '' },
-      },
-    })
+    userStore.updateConfig(store)
   }
 
   const tabClass = `flex flex-col gap-4`
@@ -193,7 +114,7 @@ const Settings: Component<{ footer?: (children: any) => void }> = (props) => {
   )
 
   return (
-    <>
+    <Page>
       <PageHeader
         title="Settings"
         subtitle={
@@ -214,22 +135,18 @@ const Settings: Component<{ footer?: (children: any) => void }> = (props) => {
           }}
         />
       </div>
-      <form ref={formRef!} autocomplete="off">
+      <form autocomplete="off">
         <div class="flex flex-col gap-4">
           <div class={currentTab() === 'ai' ? tabClass : 'hidden'}>
-            <AISettings onHordeWorkersChange={setWorkers} onHordeModelsChange={setModels} />
+            <AISettings state={store} setter={setStore} />
           </div>
 
           <div class={currentTab() === 'ui' ? tabClass : 'hidden'}>
             <UISettings />
           </div>
 
-          <div class={currentTab() === 'image' ? tabClass : 'hidden'}>
-            <ImageSettings />
-          </div>
-
           <div class={currentTab() === 'voice' ? tabClass : 'hidden'}>
-            <VoiceSettings />
+            <VoiceSettings state={store} setter={setStore} />
           </div>
 
           <div class={currentTab() === 'subscription' ? tabClass : 'hidden'}>
@@ -250,75 +167,8 @@ const Settings: Component<{ footer?: (children: any) => void }> = (props) => {
           <div class="flex justify-end gap-2 pt-4">{footer}</div>
         </Show>
       </form>
-    </>
+    </Page>
   )
 }
 
 export default Settings
-
-const settingsForm = {
-  defaultPreset: 'string?',
-  koboldUrl: 'string?',
-  thirdPartyFormat: THIRDPARTY_FORMATS,
-  oobaUrl: 'string?',
-  thirdPartyPassword: 'string?',
-  novelApiKey: 'string?',
-  novelModel: 'string?',
-  hordeUseTrusted: 'boolean?',
-  hordeKey: 'string?',
-  hordeModel: 'string?',
-  oaiKey: 'string?',
-  mistralKey: 'string?',
-  scaleApiKey: 'string?',
-  scaleUrl: 'string?',
-  claudeApiKey: 'string?',
-  logPromptsToBrowserConsole: 'boolean?',
-
-  useLocalPipeline: 'boolean?',
-  summariseChat: 'boolean?',
-  summaryPrompt: 'string?',
-
-  imageType: ['horde', 'sd', 'novel', 'agnai'],
-  imageSteps: 'number',
-  imageClipSkip: 'number',
-  imageCfg: 'number',
-  imageWidth: 'number',
-  imageHeight: 'number',
-  imagePrefix: 'string?',
-  imageSuffix: 'string?',
-  imageNegative: 'string?',
-
-  novelImageModel: 'string',
-  novelSampler: 'string',
-
-  hordeSampler: 'string',
-  hordeImageModel: 'string?',
-
-  sdUrl: 'string',
-  sdSampler: 'string',
-
-  agnaiModel: 'string?',
-  agnaiSampler: 'string?',
-
-  speechToTextEnabled: 'boolean',
-  speechToTextAutoSubmit: 'boolean',
-  speechToTextAutoRecord: 'boolean',
-
-  textToSpeechEnabled: 'boolean',
-  textToSpeechFilterActions: 'boolean',
-
-  elevenLabsApiKey: 'string?',
-} as const
-
-function getAdapterConfig(entries: Array<[string, any]>) {
-  let obj: any = {}
-
-  for (const [prop, value] of entries) {
-    if (!prop.startsWith('adapterConfig.')) continue
-    applyDotProperty(obj, prop.replace('adapterConfig.', ''), value)
-    // const name = prop.replace('adapterConfig.', '')
-    // obj[name] = value
-  }
-
-  return obj
-}

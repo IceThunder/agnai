@@ -4,14 +4,17 @@ import { localApi } from './storage'
 import { toArray } from '/common/util'
 import { UI } from '/common/types'
 import { storage } from '/web/shared/util'
+import { HORDE_SEED } from '/common/horde-gen'
 import { AIAdapter } from '/common/adapters'
 
-type InitEntities = {
+export type InitEntities = {
   profile: AppSchema.Profile
   user: AppSchema.User
   presets: AppSchema.UserGenPreset[]
   config: AppSchema.AppConfig
   books: AppSchema.MemoryBook[]
+  replicate: any
+  scenarios: AppSchema.ScenarioBook[]
 }
 
 export const usersApi = {
@@ -24,6 +27,7 @@ export const usersApi = {
   updateConfig,
   updatePartialConfig,
   updateProfile,
+  removeProfileAvatar,
   updateUI,
   updateServiceConfig,
   novelLogin,
@@ -31,7 +35,7 @@ export const usersApi = {
 
 export async function getInit() {
   if (isLoggedIn()) {
-    const res = await api.get<InitEntities>('/user/init')
+    const res = await api.get<InitEntities>(`/user/init?seed=${HORDE_SEED}&ts=${Date.now()}`)
     return res
   }
 
@@ -40,7 +44,7 @@ export async function getInit() {
 }
 
 export async function getSubscriptions() {
-  const res = await api.get<{ subscriptions: AppSchema.SubscriptionOption[] }>(
+  const res = await api.get<{ subscriptions: AppSchema.SubscriptionModelOption[] }>(
     '/settings/subscriptions'
   )
   return res
@@ -131,6 +135,21 @@ export async function updateProfile(handle: string, file?: File) {
   if (file) form.append('avatar', file)
 
   const res = await api.upload<AppSchema.Profile>('/user/profile', form)
+  return res
+}
+
+async function removeProfileAvatar() {
+  if (!isLoggedIn()) {
+    const prev = await localApi.loadItem('profile')
+    const next: AppSchema.Profile = {
+      ...prev,
+      avatar: undefined,
+    }
+    await localApi.saveProfile(next)
+    return { result: next, error: undefined }
+  }
+
+  const res = await api.method('delete', '/user/profile/avatar')
   return res
 }
 

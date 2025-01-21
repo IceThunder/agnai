@@ -1,5 +1,6 @@
-import { createStore } from './create'
+import { createStore, getStore } from './create'
 import { subscribe } from './socket'
+import { setNotifier } from '/common/requests/util'
 
 export type Toast = {
   id: number
@@ -26,7 +27,7 @@ export const toastStore = createStore<ToastState>('toasts', {
   const addToast = (kind: Toast['type']) => {
     return (_: ToastState, msg: string, ttl = 5) => {
       if (kind === 'admin') {
-        ttl = 15
+        ttl = 300
       }
 
       const id = ++toastId
@@ -53,6 +54,8 @@ export const toastStore = createStore<ToastState>('toasts', {
       return { toasts: toasts.concat(toast), history: nextHistory, unseen }
     }
   }
+
+  const adminToast = addToast('admin')
 
   return {
     modal({ history }, state: boolean) {
@@ -81,9 +84,22 @@ export const toastStore = createStore<ToastState>('toasts', {
     warn: addToast('warn'),
     success: addToast('success'),
     error: addToast('error'),
-    admin: addToast('admin'),
+    admin: (_, message: string, level?: number) => {
+      if (level === undefined) {
+        adminToast(_, message)
+        return
+      }
+      const user = getStore('user').getState()
+      const userLevel = user.user?.admin ? Infinity : user.userLevel
+
+      if (userLevel >= level) {
+        return adminToast(_, message)
+      }
+    },
   }
 })
+
+setNotifier(toastStore)
 
 subscribe('notification', { level: 'string?', message: 'string', ttl: 'number?' }, (body) => {
   switch (body.level) {
@@ -115,6 +131,6 @@ function getLevel(type: Toast['type']) {
   }
 }
 
-subscribe('admin-notification', { message: 'string' }, (body) => {
-  toastStore.admin(body.message)
+subscribe('admin-notification', { message: 'string', level: 'number?' }, (body) => {
+  toastStore.admin(body.message, body.level)
 })

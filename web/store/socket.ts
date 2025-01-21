@@ -1,5 +1,6 @@
 import { UnwrapBody, Validator, isValid } from '/common/valid'
 import { baseUrl, getAuth, setSocketId } from './api'
+import { setEmitter } from '/common/requests/util'
 
 type Handler = { validator: Validator; fn: (body: any) => void }
 
@@ -15,6 +16,7 @@ type ClientSocket = WebSocket & { pingTimeout: any }
 let socket: ClientSocket
 
 createSocket()
+setEmitter(localEmit)
 
 function createSocket() {
   const socketUrl = baseUrl.replace('https://', 'wss://').replace('http://', 'ws://')
@@ -31,6 +33,27 @@ export function publish<T extends { type: string }>(payload: T) {
   if (!isAuthed) return
 
   socket.send(JSON.stringify(payload))
+}
+
+export function localEmit<T extends { type: string }>(payload: T) {
+  const handlers = listeners.get(payload.type) || []
+  const onceHandlers = onceListeners.get(payload.type) || []
+
+  for (const handler of handlers) {
+    if (!isValid(handler.validator, payload)) continue
+    handler.fn(payload)
+  }
+
+  for (const handler of onceHandlers) {
+    if (!isValid(handler.validator, payload)) continue
+    if (!handler.predicate(payload)) continue
+
+    handler.fn(payload)
+    const i = onceHandlers.findIndex((h) => h === handler)
+    onceHandlers.splice(i, 1)
+  }
+
+  onceListeners.set(payload.type, onceHandlers)
 }
 
 export function subscribe<T extends string, U extends Validator>(
@@ -50,7 +73,16 @@ export function subscribe<T extends string, U extends Validator>(
   listeners.set(type, handlers)
 }
 
-const squelched = new Set(['profile-handle-changed', 'message-partial', 'guidance-partial', 'ping'])
+const squelched = new Set([
+  'profile-handle-changed',
+  'message-partial',
+  'guidance-partial',
+  'ping',
+  'inference-partial',
+  'horde-check',
+  'message-created',
+  'message-try',
+])
 
 function onMessage(msg: MessageEvent<any>) {
   if (typeof msg.data !== 'string') return
@@ -65,16 +97,23 @@ function onMessage(msg: MessageEvent<any>) {
     const onceHandlers = onceListeners.get(payload.type) || []
 
     if (!squelched.has(payload.type)) {
-      if (payload.type === 'service-prompt') {
-        console.log(`Prompt\n${payload.prompt}`)
+      if (payload.type === 'service-prompt' || payload.type === 'inference-prompt') {
+        console.log(
+          `Prompt\n${
+            typeof payload.prompt === 'string'
+              ? payload.prompt
+              : JSON.stringify(payload.prompt, null, 2)
+          }`
+        )
       } else if (payload.type !== 'image-generated') {
-        console.log(JSON.stringify(payload))
+        console.log(`[${new Date().toLocaleTimeString()}]`, JSON.stringify(payload))
       } else {
+        const image = payload.image || ''
         console.log(
           `[${new Date().toLocaleTimeString()}]`,
           JSON.stringify({
             ...payload,
-            image: (payload.image || '').slice(0, 60) + '...',
+            image: image.startsWith('http') ? image : `${image.slice(0, 60)}'...'`,
           })
         )
       }
@@ -102,7 +141,11 @@ function onMessage(msg: MessageEvent<any>) {
 
 function onConnected() {
   RETRY_TIME = 0
-  publish({ type: 'version', version: 1 })
+  let sha = window.agnai_version
+  if (sha === '{{unknown}}') {
+    sha = 'local'
+  }
+  publish({ type: 'version', version: 1, sha })
   const token = getAuth()
   if (!token) return
   publish({ type: 'login', token })

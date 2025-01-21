@@ -1,5 +1,6 @@
 import Cookies from 'js-cookie'
 import { EVENTS, events } from '../emitter'
+import { jwtDecode } from 'jwt-decode'
 
 let socketId = ''
 
@@ -11,16 +12,19 @@ const PROTO = location.protocol
 const HOST = location.hostname.toLowerCase()
 const PORT = location.port
 
-export const baseUrl =
-  PORT === '1234' || PORT === '3001' || HOST === 'localhost' || HOST === '127.0.0.1'
-    ? `${PROTO}//${HOST}:3001`
-    : HOST === 'agnai.chat' || HOST === 'prd-assets.agnai.chat'
-    ? `${PROTO}//prd-api.agnai.chat`
-    : HOST === 'dev.agnai.chat' || HOST === 'dev-assets.agnai.chat'
-    ? `${PROTO}//prd-api.agnai.chat`
-    : HOST === 'stg.agnai.chat'
-    ? `${PROTO}//stg-api.agnai.chat`
-    : location.origin
+const API_OVERRIDE = localStorage.getItem('api_url')
+
+export const baseUrl = API_OVERRIDE
+  ? `${PROTO}//${API_OVERRIDE}`
+  : PORT === '1234' || PORT === '3001' || HOST === 'localhost' || HOST === '127.0.0.1'
+  ? `${PROTO}//${HOST}:3001`
+  : HOST === 'agnai.chat' || HOST === 'prd-assets.agnai.chat'
+  ? `${PROTO}//edge-api.agnai.chat`
+  : HOST === 'dev.agnai.chat' || HOST === 'dev-assets.agnai.chat'
+  ? `${PROTO}//edge-api.agnai.chat`
+  : HOST === 'stg.agnai.chat'
+  ? `${PROTO}//stg-api.agnai.chat`
+  : location.origin
 
 export const api = {
   get,
@@ -55,7 +59,10 @@ async function get<T = any>(path: string, query: Query = {}) {
     .map((key) => `${key}=${query[key]}`)
     .join('&')
 
-  return callApi<T>(`${path}?${params}`, {
+  const infix = path.includes('?') ? '&' : '?'
+  let url = params ? `${path}${infix}${params}` : path
+
+  return callApi<T>(url, {
     method: 'get',
   })
 }
@@ -223,8 +230,7 @@ export function getUserId() {
 }
 
 function getTokenBody(jwt: string) {
-  const [_head, body, _sign] = jwt.split('.')
-  const data = JSON.parse(window.atob(body))
+  const data = jwtDecode(jwt)
   return data as { admin: boolean; exp: number; iat: number; userId: string; username: string }
 }
 
@@ -236,7 +242,7 @@ export function setAltAuth(jwt: string) {
 
   Cookies.set('original-auth', prev, { sameSite: 'strict', expires: 30 })
   Cookies.set('auth', jwt, { sameSite: 'strict', expires: 30 })
-  location.href = `${location.origin}/settings?tab=4`
+  location.href = `${location.origin}/settings?tab=3`
 }
 
 export function revertAuth() {

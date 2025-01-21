@@ -1,16 +1,21 @@
 import { HordeModel, HordeWorker } from '../../common/adapters'
 import { AppSchema } from '../../common/types/schema'
 import { EVENTS, events } from '../emitter'
-import { setAssetPrefix } from '../shared/util'
+import { setAssetPrefix, storage } from '../shared/util'
 import { api } from './api'
-import { createStore } from './create'
-import { usersApi } from './data/user'
+import { createStore, getStore } from './create'
+import { InitEntities, usersApi } from './data/user'
 import { toastStore } from './toasts'
 import { subscribe } from './socket'
 import { FeatureFlags, defaultFlags } from './flags'
 import { ReplicateModel } from '/common/types/replicate'
-import { tryParse, wait } from '/common/util'
+import { getSubscriptionModelLimits, tryParse, wait } from '/common/util'
 import { ButtonSchema } from '../shared/Button'
+import { canUsePane, isMobile } from '../shared/hooks'
+import { setContextLimitStrategy } from '/common/prompt'
+import { filterImageModels } from '/common/image-util'
+import type { FeatherlessModel } from '/srv/adapter/featherless'
+import type { ArliModel } from '/srv/adapter/arli'
 
 export type SettingState = {
   guestAccessAllowed: boolean
@@ -22,8 +27,9 @@ export type SettingState = {
 
   showMenu: boolean
   showImpersonate: boolean
-  fullscreen: boolean
   config: AppSchema.AppConfig
+
+  allImageModels: AppSchema.ImageModel[]
   models: HordeModel[]
   workers: HordeWorker[]
   imageWorkers: HordeWorker[]
@@ -40,12 +46,16 @@ export type SettingState = {
     url: string
     options: Array<{ schema: ButtonSchema; text: string; onClick: () => void }>
   }
+
   flags: FeatureFlags
   replicate: Record<string, ReplicateModel>
+  featherless: { models: FeatherlessModel[]; classes: Record<string, { ctx: number; res: number }> }
+  arliai: { models: ArliModel[]; classes: Record<string, { ctx: number; res: number }> }
   showSettings: boolean
+  showImgSettings: boolean
 
   slotsLoaded: boolean
-  slots: { publisherId: string; provider?: 'google' | 'ez' } & Record<string, any>
+  slots: { publisherId: string; provider?: 'google' | 'ez' | 'fuse' } & Record<string, any>
   overlay: boolean
 }
 
@@ -54,16 +64,16 @@ const HORDE_URL = `https://aihorde.net/api/v2`
 const FLAG_KEY = 'agnai-flags'
 
 const initState: SettingState = {
-  anonymize: false,
+  anonymize: JSON.parse(storage.localGetItem('agnai-anonymize') || 'false'),
   guestAccessAllowed: canUseStorage(),
   initLoading: true,
   cfg: { loading: false, ttl: 0 },
-  showMenu: false,
+  showMenu: isMobile() || location.search.includes('callback=') ? false : true,
   showImpersonate: false,
-  fullscreen: false,
   models: [],
   workers: [],
   imageWorkers: [],
+  allImageModels: [],
   config: {
     serverConfig: {} as any,
     registered: [],
@@ -74,14 +84,17 @@ const initState: SettingState = {
     selfhosting: false,
     imagesSaved: false,
     pipelineProxyEnabled: false,
-    authUrls: ['https://chara.cards', 'https://dev.chara.cards'],
+    authUrls: [],
     horde: { workers: [], models: [] },
     openRouter: { models: [] },
     subs: [],
   },
   replicate: {},
+  featherless: { models: [], classes: {} },
+  arliai: { models: [], classes: {} },
   flags: getFlags(),
   showSettings: false,
+  showImgSettings: false,
   slotsLoaded: false,
   slots: { publisherId: '' },
   overlay: false,
@@ -117,27 +130,50 @@ export const settingStore = createStore<SettingState>(
       const next = show ?? !showSettings
       return { showSettings: next }
     },
+    imageSettings({ showImgSettings }, next?: boolean) {
+      if (next === undefined) {
+        return { showImgSettings: !showImgSettings }
+      }
+
+      return { showImgSettings: next }
+    },
     async *init({ config: prev }) {
       yield { initLoading: true }
       const res = await usersApi.getInit()
 
       if (res.result) {
-        setAssetPrefix(res.result.config.assetPrefix)
-        loadSlotConfig(res.result.config?.serverConfig?.slots)
+        const init = res.result as InitEntities
+        setAssetPrefix(init.config.assetPrefix)
+        loadSlotConfig(init.config?.serverConfig?.slots)
 
-        const isMaint = res.result.config?.maintenance
+        const isMaint = init.config?.maintenance
+
+        if (init.config.serverConfig) {
+          yield { allImageModels: init.config.serverConfig.imagesModels || [] }
+
+          if (!init.config.tier?.imagesAccess && !init.user?.admin) {
+            init.config.serverConfig.imagesModels = []
+          } else {
+            init.config.serverConfig.imagesModels = filterImageModels(
+              init.user,
+              init.config.serverConfig.imagesModels,
+              init.config.tier
+            )
+          }
+        }
+
         if (!isMaint) {
-          events.emit(EVENTS.init, res.result)
+          events.emit(EVENTS.init, init)
         }
 
         yield {
-          init: res.result,
-          config: res.result.config,
-          replicate: res.result.replicate || {},
+          init,
+          config: init.config,
+          replicate: init.replicate || {},
           initLoading: false,
         }
 
-        const maint = res.result.config?.maintenance
+        const maint = init.config?.maintenance
 
         if (!maint && prev.maintenance) {
           toastStore.success(`Agnaistic is no longer in maintenance mode`, 10)
@@ -160,17 +196,46 @@ export const settingStore = createStore<SettingState>(
     toggleOverlay({ overlay }, next?: boolean) {
       return { overlay: next === undefined ? !overlay : next }
     },
-    menu({ showMenu }) {
-      return { showMenu: !showMenu, overlay: !showMenu }
+    menu({ showMenu }, next?: boolean) {
+      return { showMenu: next ?? !showMenu, overlay: next ?? !showMenu }
     },
     closeMenu: () => {
+      if (canUsePane()) return
       return { showMenu: false, overlay: false }
     },
     toggleImpersonate: ({ showImpersonate }, show?: boolean) => {
       return { showImpersonate: show ?? !showImpersonate }
     },
-    fullscreen(_, next: boolean) {
-      return { fullscreen: next }
+    async getFeatherless() {
+      const res = await api.get('/settings/featherless')
+
+      if (res.result?.models?.length) {
+        return { featherless: res.result }
+      }
+    },
+    async getArliAI() {
+      const res = await api.get('/settings/arli')
+
+      if (res.result?.models?.length) {
+        return { arliai: res.result }
+      }
+    },
+    async *getServerConfig({ cfg, config, init }) {
+      if (cfg.loading) return
+
+      yield { cfg: { loading: true, ttl: cfg.ttl } }
+      const res = await api.get<AppSchema.AppConfig>('/settings')
+      yield { cfg: { loading: false, ttl: cfg.ttl } }
+
+      const serverConfig = res.result?.serverConfig
+      if (serverConfig) {
+        serverConfig.imagesModels = filterImageModels(
+          init?.user!,
+          serverConfig.imagesModels,
+          res.result?.tier
+        )
+        return { config: { ...config, serverConfig } }
+      }
     },
     async *getConfig({ cfg }) {
       if (cfg.loading) return
@@ -215,6 +280,7 @@ export const settingStore = createStore<SettingState>(
     },
 
     toggleAnonymize({ anonymize }) {
+      storage.localSetItem('agnai-anonymize', JSON.stringify(!anonymize))
       return { anonymize: !anonymize }
     },
     showImage(
@@ -234,6 +300,24 @@ export const settingStore = createStore<SettingState>(
       return { flags: nextFlags }
     },
   }
+})
+
+setContextLimitStrategy((user, gen) => {
+  const {
+    config: { subs },
+  } = settingStore.getState()
+  const { sub } = getStore('user').getState()
+  if (!gen || gen.service !== 'agnaistic') return
+
+  const tier = subs.find((sub) => sub._id === gen.registered?.agnaistic?.subscriptionId || '')
+  if (!tier) return
+
+  const level = sub?.level ?? -1
+
+  const limits = getSubscriptionModelLimits(tier.preset, level)
+  if (!limits) return
+
+  return { context: limits.maxContextLength, tokens: limits.maxTokens }
 })
 
 let firstConnection = true
@@ -341,6 +425,8 @@ async function loadSlotConfig(serverSlots?: string) {
   const slots: any = { publisherId: '' }
   const server = serverSlots ? tryParse(serverSlots) || {} : {}
 
+  const useDev = location.host !== 'agnai.chat'
+
   try {
     const content = await fetch('/slots.txt', { cache: 'no-cache' }).then((res) => res.text())
     const config = tryParse(content) || {}
@@ -350,12 +436,18 @@ async function loadSlotConfig(serverSlots?: string) {
       slots[key] = value
     }
 
-    const inject = server.inject || config.inject
+    const devInject = useDev ? server?.dev_inject : undefined
+    const devProvider = useDev ? server?.dev_provider : undefined
+    const inject = devInject || server.inject || config.inject
 
-    if (inject) {
+    server.provider = devProvider || server.provider || slots.provider
+
+    if (server.provider && inject) {
       await wait(0.2)
       const node = document.createRange().createContextualFragment(inject)
-      document.head.append(node)
+      try {
+        document.head.append(node)
+      } catch (ex) {}
     }
   } catch (ex: any) {
     console.log(ex.message)
@@ -364,30 +456,6 @@ async function loadSlotConfig(serverSlots?: string) {
     settingStore.setState({ slots: Object.assign(slots, server), slotsLoaded: true })
   }
 }
-
-setInterval(async () => {
-  const { config } = settingStore.getState()
-  if (!config.subs.length) return
-
-  const res = await usersApi.getSubscriptions()
-  if (!res.result) return
-
-  if (!isDirty(res.result.subscriptions, config.subs)) return
-
-  const opts = res.result.subscriptions.map((sub) => ({ label: sub.name, value: sub._id }))
-  const next = {
-    ...config,
-    subs: res.result.subscriptions,
-    registered: config.registered.map((reg) => {
-      if (reg.name !== 'agnaistic') return reg
-      const settings = reg.settings.map((s) =>
-        s.field === 'subscriptionId' ? { ...s, setting: { ...s.setting, options: opts } } : s
-      )
-      return { ...reg, settings }
-    }),
-  }
-  settingStore.setState({ config: next })
-}, 60000)
 
 subscribe('configuration-update', { configuration: 'any' }, (body) => {
   const { config } = settingStore.getState()
@@ -399,33 +467,44 @@ subscribe('configuration-update', { configuration: 'any' }, (body) => {
   })
 })
 
+subscribe('submodel-updated', { model: 'any' }, (body) => {
+  const { config } = settingStore.getState()
+  const incoming: AppSchema.SubscriptionModelOption = body.model
+
+  const exists = config.subs.find((sub) => sub._id === incoming._id)
+
+  const next = exists
+    ? config.subs.map((sub) => (sub._id === incoming._id ? incoming : sub))
+    : config.subs.concat(incoming)
+
+  const opts = next.map((sub) => ({ label: sub.name, value: sub._id }))
+
+  const registered = config.registered.map((reg) => {
+    if (reg.name !== 'agnaistic') return reg
+    const settings = reg.settings.map((s) =>
+      s.field === 'subscriptionId' ? { ...s, setting: { ...s.setting, options: opts } } : s
+    )
+    return { ...reg, settings }
+  })
+
+  if (!exists) {
+    const { user, userLevel } = getStore('user').getState()
+    const isEligible = incoming.level <= userLevel || !!user?.admin
+    if (isEligible) {
+      toastStore.success(`A new model has been added: "${incoming.name}"`, 30)
+    }
+  }
+
+  settingStore.setState({ config: { ...config, subs: next, registered } })
+})
+
 subscribe(
   'subscription-replaced',
   { subscriptionId: 'string', replacementId: 'string' },
   (body) => {
     const { config } = settingStore.getState()
     const next = config.subs.filter((sub) => sub._id !== body.subscriptionId)
-    return {
-      config: { ...config, subs: next },
-    }
+
+    settingStore.setState({ config: { ...config, subs: next } })
   }
 )
-
-function isDirty<T extends { _id: string; level: number }>(left: T[], right: T[]) {
-  if (left.length !== right.length) return true
-  const ids = new Set<string>()
-  const levels = new Map<string, number>()
-  for (const l of left) {
-    ids.add(l._id)
-    levels.set(l._id, l.level)
-  }
-
-  for (const r of right) {
-    ids.add(r._id)
-    const level = levels.get(r._id)
-    if (level !== r.level) return true
-  }
-
-  if (ids.size !== left.length) return true
-  return false
-}

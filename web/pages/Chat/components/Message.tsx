@@ -16,6 +16,7 @@ import {
   Zap,
   Split,
   MoreHorizontal,
+  Braces,
 } from 'lucide-solid'
 import {
   Accessor,
@@ -34,7 +35,7 @@ import {
 import { BOT_REPLACE, SELF_REPLACE } from '../../../../common/prompt'
 import { AppSchema } from '../../../../common/types/schema'
 import AvatarIcon, { CharacterAvatar } from '../../../shared/AvatarIcon'
-import { getAssetUrl, getStrictForm } from '../../../shared/util'
+import { getAssetUrl } from '../../../shared/util'
 import {
   chatStore,
   userStore,
@@ -48,16 +49,19 @@ import { markdown } from '../../../shared/markdown'
 import Button, { ButtonSchema } from '/web/shared/Button'
 import { rootModalStore } from '/web/store/root-modal'
 import { ContextState, useAppContext } from '/web/store/context'
-import { trimSentence } from '/common/util'
+import { hydrateTemplate, trimSentence } from '/common/util'
 import { EVENTS, events } from '/web/emitter'
 import TextInput from '/web/shared/TextInput'
-import { Card } from '/web/shared/Card'
+import { Card, Pill } from '/web/shared/Card'
 import { FeatureFlags } from '/web/store/flags'
 import { DropMenu } from '/web/shared/DropMenu'
 import { ChatTree } from '/common/chat'
 import { Portal } from 'solid-js/web'
 import { UI } from '/common/types'
 import { LucideProps } from 'lucide-solid/dist/types/types'
+import { createStore } from 'solid-js/store'
+import { Spinner } from '/web/shared/Loading'
+import { LogProbs } from './LogProbs'
 
 type MessageProps = {
   msg: SplitMessage
@@ -78,6 +82,7 @@ type MessageProps = {
   textBeforeGenMore?: string
   voice?: VoiceState
   firstInserted?: boolean
+  index: number
 }
 
 const anonNames = new Map<string, number>()
@@ -105,6 +110,7 @@ const Message: Component<MessageProps> = (props) => {
   const isUser = !!props.msg.userId
   const [img, setImg] = createSignal('h-full')
   const opts = createSignal(false)
+  const [jsonValues, setJsonValues] = createSignal(props.msg.json?.values || {})
 
   const showOpt = createSignal(false)
 
@@ -124,7 +130,25 @@ const Message: Component<MessageProps> = (props) => {
   })
 
   const saveEdit = () => {
+    if (props.msg.json) {
+      const json = jsonValues()
+      const update = getJsonUpdate(
+        ctx.preset?.jsonSource === 'character'
+          ? ctx.activeMap[props.msg.characterId!]?.json
+          : ctx.preset?.json,
+        json
+      )
+
+      if (update) {
+        msgStore.editMessageProp(props.msg._id, update)
+      }
+
+      setEdit(false)
+      return
+    }
+
     if (!editRef) return
+
     msgStore.editMessage(props.msg._id, editRef.innerText)
     setEdit(false)
   }
@@ -139,16 +163,25 @@ const Message: Component<MessageProps> = (props) => {
     editRef?.focus()
   }
 
+  const alt = createMemo(() => {
+    const percent = `${ctx.ui.chatAlternating ?? 0}%`
+    return {
+      width: `calc(100% - ${ctx.ui.chatAlternating ?? 0}%)`,
+      'margin-right': ctx.user?._id === props.msg.userId ? percent : undefined,
+      'margin-left': ctx.user?._id !== props.msg.userId ? percent : undefined,
+    }
+  })
+
   return (
     <div
       class={'flex w-full rounded-md px-2 py-2 pr-2 sm:px-4'}
       data-sender={props.msg.characterId ? 'bot' : 'user'}
       data-bot={props.msg.characterId ? ctx.char?.name : ''}
-      data-user={props.msg.userId ? state.memberIds[props.msg.userId]?.handle : ''}
+      data-user={props.msg.userId ? state.memberIds[props.msg.userId]?.handle : props.msg.name}
       data-last={props.last?.toString()}
       data-lastsplit="true"
+      style={true ? {} : alt()}
       classList={{
-        'first-in-ctx-window': user.ui.contextWindowLine && props.firstInserted,
         'bg-chat-bot': !props.msg.ooc && !props.msg.userId,
         'bg-chat-user': !props.msg.ooc && !!props.msg.userId,
         'bg-chat-ooc': !!props.msg.ooc,
@@ -165,6 +198,7 @@ const Message: Component<MessageProps> = (props) => {
               data-user-avatar={isUser}
             >
               <Switch>
+                <Match when={user.ui.avatarSize === 'hide'}>{null}</Match>
                 <Match when={props.msg.event === 'world' || props.msg.event === 'ooc'}>
                   <div
                     class={`avatar-${format().size} flex shrink-0 items-center justify-center pt-3`}
@@ -203,6 +237,15 @@ const Message: Component<MessageProps> = (props) => {
                     anonymize={ctx.anonymize}
                   />
                 </Match>
+
+                <Match when>
+                  <AvatarIcon
+                    format={format()}
+                    Icon={DownloadCloud}
+                    avatarUrl={state.memberIds[props.msg.userId!]?.avatar}
+                    anonymize={ctx.anonymize}
+                  />
+                </Match>
               </Switch>
             </span>
             <span class="flex flex-row justify-between pb-1">
@@ -231,7 +274,7 @@ const Message: Component<MessageProps> = (props) => {
                 >
                   {ctx.anonymize && !props.msg.characterId
                     ? getAnonName(props.msg.userId!)
-                    : props.msg.handle || ''}
+                    : props.msg.handle}
                 </b>
 
                 <span
@@ -285,6 +328,7 @@ const Message: Component<MessageProps> = (props) => {
                   }
                 >
                   <MessageOptions
+                    index={props.index}
                     ui={user.ui}
                     msg={props.msg}
                     edit={edit}
@@ -378,7 +422,7 @@ const Message: Component<MessageProps> = (props) => {
                     data-user-message={!!props.msg.userId}
                     innerHTML={content().message}
                   />
-                  <Show when={props.msg.adapter === 'partial' && props.last}>
+                  <Show when={props.msg.adapter === 'partial-response' && props.last}>
                     <span class="flex h-8 w-12 items-center justify-center">
                       <span class="dot-flashing bg-[var(--hl-700)]"></span>
                     </span>
@@ -407,9 +451,25 @@ const Message: Component<MessageProps> = (props) => {
                     data-user-message={!!props.msg.userId}
                     innerHTML={content().message}
                   />
-                  <div class="flex h-8 w-12 items-center justify-center">
-                    <div class="dot-flashing bg-[var(--hl-700)]"></div>
-                  </div>
+                  <Show
+                    when={ctx.waiting?.image}
+                    fallback={
+                      <div class="flex h-8 w-12 items-center justify-center">
+                        <div class="dot-flashing bg-[var(--hl-700)]"></div>
+                      </div>
+                    }
+                  >
+                    <Spinner />{' '}
+                    <span
+                      class="text-500 text-xs italic"
+                      classList={{ hidden: !ctx.status?.wait_time }}
+                    >
+                      {ctx.status?.wait_time || '0'}s
+                    </span>
+                  </Show>
+                </Match>
+                <Match when={edit() && props.msg.json}>
+                  <JsonEdit msg={props.msg} update={(next) => setJsonValues(next)} />
                 </Match>
                 <Match when={edit()}>
                   <div
@@ -443,7 +503,40 @@ function anonymizeText(text: string, profile: AppSchema.Profile, i: number) {
   return text.replace(new RegExp(profile.handle.trim(), 'gi'), 'User ' + (i + 1))
 }
 
+const JsonEdit: Component<{ msg: SplitMessage; update: (next: any) => void }> = (props) => {
+  const entries = createMemo(() => Object.keys(props.msg.json?.values || {}))
+  const [editing, setEditing] = createStore<Record<string, string>>(props.msg.json?.values || {})
+
+  onMount(() => {
+    props.update(props.msg.json?.values || {})
+  })
+
+  return (
+    <div class="flex flex-col gap-2">
+      <For each={entries()}>
+        {(key) => (
+          <div class="flex flex-col">
+            <Pill type="bg" small opacity={0.5} class="rounded-b-none rounded-t-md">
+              {key}
+            </Pill>
+            <div
+              ref={(r) => (r.innerText = editing[key])}
+              class="msg-edit-text-box rounded-md rounded-tl-none border border-[var(--bg-500)] p-1"
+              contentEditable={true}
+              onKeyUp={(ev: any) => {
+                setEditing(key, ev.target.innerText)
+                props.update(editing)
+              }}
+            ></div>
+          </div>
+        )}
+      </For>
+    </div>
+  )
+}
+
 const MessageOptions: Component<{
+  index: number
   msg: SplitMessage
   ui: UI.UISettings
   tts: boolean
@@ -456,8 +549,6 @@ const MessageOptions: Component<{
   onRemove: () => void
   showMore: Signal<boolean>
 }> = (props) => {
-  const showInner = createMemo(() => Object.values(props.ui.msgOptsInline || {}).some((v) => !!v))
-
   const closer = (action: () => void) => {
     return () => {
       action()
@@ -523,6 +614,20 @@ const MessageOptions: Component<{
         icon: RefreshCw,
       },
 
+      'schema-regen': {
+        key: 'schema-regen',
+        class: 'refresh-btn',
+        label: 'Schema Regen',
+        outer: props.ui.msgOptsInline['schema-regen'],
+        show:
+          window.flags.reschema &&
+          ((props.msg.json && props.last) ||
+            (props.msg.adapter === 'image' && !!props.msg.imagePrompt)) &&
+          !!props.msg.characterId,
+        onClick: () => !props.partial && retryJsonSchema(props.msg, props.msg),
+        icon: Braces,
+      },
+
       trash: {
         key: 'trash',
         label: 'Delete',
@@ -536,6 +641,15 @@ const MessageOptions: Component<{
     }
 
     return items
+  })
+
+  const showInner = createMemo(() => {
+    const logics = logic()
+    for (const opt of Object.values(logics)) {
+      if (!opt.outer.outer && opt.show) return true
+    }
+
+    return false
   })
 
   const order = createMemo(() => {
@@ -572,7 +686,11 @@ const MessageOptions: Component<{
         }}
       </For>
 
-      <div class="flex items-center" onClick={() => props.showMore[1](true)}>
+      <div
+        class="flex items-center"
+        classList={{ 'tour-message-opts': props.index === 0, hidden: !showInner() }}
+        onClick={() => props.showMore[1](true)}
+      >
         <MoreHorizontal class="icon-button" />
       </div>
 
@@ -638,7 +756,7 @@ const MessageOption: Component<{
 
         <Show when={!props.outer}>
           <Button
-            class={`${props.class || ''} w-full`}
+            class={`${props.class || ''} w-full min-w-max`}
             schema={props.schema || 'secondary'}
             onClick={props.onClick}
             size="sm"
@@ -658,6 +776,10 @@ function retryMessage(original: AppSchema.ChatMessage, split: SplitMessage) {
   } else {
     msgStore.createImage(split._id)
   }
+}
+
+function retryJsonSchema(original: AppSchema.ChatMessage, split: SplitMessage) {
+  msgStore.retrySchema(split.chatId, original._id)
 }
 
 function renderMessage(ctx: ContextState, text: string, isUser: boolean, adapter?: string) {
@@ -718,13 +840,11 @@ const Meta: Component<{
   flags: FeatureFlags
   tree: ChatTree
 }> = (props) => {
-  let ref: any
-
   if (!props.msg) return null
+  const [prompt, setPrompt] = createSignal(props.msg?.imagePrompt || '')
 
   const updateImagePrompt = () => {
-    const { imagePrompt } = getStrictForm(ref, { imagePrompt: 'string' })
-    msgStore.editMessageProp(props.msg._id, { imagePrompt }, () => {
+    msgStore.editMessageProp(props.msg._id, { imagePrompt: prompt() }, () => {
       toastStore.success('Image prompt updated')
     })
   }
@@ -739,8 +859,9 @@ const Meta: Component<{
   const depth = props.tree[props.msg._id]?.depth || -1
 
   return (
-    <form ref={ref} class="flex w-full flex-col gap-2">
+    <form class="flex w-full flex-col gap-2">
       <Card>
+        <LogProbs msg={props.msg} />
         <table class="text-sm">
           <Show when={props.msg.adapter}>
             <tr>
@@ -770,7 +891,7 @@ const Meta: Component<{
               </td>
             </tr>
           </Show>
-          <For each={Object.entries(props.msg.meta || {})}>
+          <For each={Object.entries(props.msg.meta || {}).filter(([key]) => key !== 'probs')}>
             {([key, value]) => (
               <tr>
                 <td class="pr-2">
@@ -796,8 +917,8 @@ const Meta: Component<{
             }
             parentClass="text-sm"
             isMultiline
-            value={props.msg.imagePrompt}
-            fieldName="imagePrompt"
+            value={prompt()}
+            onChange={(ev) => setPrompt(ev.currentTarget.value)}
           />
         </Card>
       </Show>
@@ -818,7 +939,7 @@ const Meta: Component<{
 
 function canShowMeta(msg: AppSchema.ChatMessage, history: any) {
   if (!msg) return false
-  if (msg._id === 'partial') return false
+  if (msg._id === 'partial-response') return false
   return !!msg.adapter || !!history || (!!msg.meta && Object.keys(msg.meta).length >= 1)
 }
 
@@ -835,7 +956,7 @@ function toImageDeleteButton(msgId: string, position: number) {
 
 function getMessageContent(ctx: ContextState, props: MessageProps, state: ChatState) {
   const isRetry = props.retrying?._id === props.msg._id
-  const isPartial = props.msg._id === 'partial'
+  const isPartial = props.msg._id === 'partial-response'
 
   if (isRetry || isPartial) {
     if (props.partial) {
@@ -876,5 +997,15 @@ function getMessageContent(ctx: ContextState, props: MessageProps, state: ChatSt
     type: 'message',
     message: renderMessage(ctx, message, !!props.msg.userId, props.msg.adapter),
     class: 'not-streaming',
+  }
+}
+
+function getJsonUpdate(def: AppSchema.Character['json'], json: any) {
+  if (!def) return
+  const hydration = hydrateTemplate(def, json)
+
+  return {
+    json: hydration,
+    msg: hydration.response,
   }
 }

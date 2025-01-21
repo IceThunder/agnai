@@ -9,6 +9,7 @@ import { getStrictForm } from '/web/shared/util'
 import Button from '/web/shared/Button'
 import Select from '/web/shared/Select'
 import { TierCard } from '../Profile/TierCard'
+import { Page } from '/web/Layout'
 
 export { TiersPage as default }
 
@@ -127,7 +128,7 @@ const TiersPage: Component = (props) => {
   })
 
   return (
-    <>
+    <Page>
       <PageHeader title="Subscription Tier" />
 
       <A href="/admin/subscriptions" class="link">
@@ -142,7 +143,7 @@ const TiersPage: Component = (props) => {
             fieldName="name"
             label="Name"
             value={editing()?.name}
-            onInput={(ev) => setName(ev.currentTarget.value)}
+            onChange={(ev) => setName(ev.currentTarget.value)}
           />
 
           <TextInput
@@ -151,7 +152,7 @@ const TiersPage: Component = (props) => {
             helperText="This is be rendered using the markdown renderer. HTML is also supported here."
             value={editing()?.description}
             isMultiline
-            onInput={(ev) => setDesc(ev.currentTarget.value)}
+            onChange={(ev) => setDesc(ev.currentTarget.value)}
           />
 
           <Toggle
@@ -196,6 +197,7 @@ const TiersPage: Component = (props) => {
               apiAccess: false,
               guidanceAccess: false,
               imagesAccess: false,
+              level: Infinity,
             }}
           />
 
@@ -230,6 +232,6 @@ const TiersPage: Component = (props) => {
           </div>
         </form>
       </Card>
-    </>
+    </Page>
   )
 }

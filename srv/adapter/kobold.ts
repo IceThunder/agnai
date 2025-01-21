@@ -1,16 +1,17 @@
 import needle from 'needle'
 import { defaultPresets } from '../../common/presets'
-import { AppLog, logger } from '../logger'
-import { normalizeUrl, sanitise, sanitiseAndTrim, trimResponseV2 } from '../api/chat/common'
+import { AppLog, logger } from '../middleware'
+import { normalizeUrl } from '../api/chat/common'
 import { AdapterProps, ModelAdapter } from './type'
-import { requestStream, websocketStream } from './stream'
+import { requestStream } from './stream'
 import { llamaStream } from './dispatch'
 import { getStoppingStrings } from './prompt'
 import { ThirdPartyFormat } from '/common/adapters'
 import { decryptText } from '../db/util'
 import { getThirdPartyPayload } from './payloads'
-import * as oai from './chat-completion'
+import * as oai from './stream'
 import { toSamplerOrder } from '/common/sampler-order'
+import { sanitise, sanitiseAndTrim, trimResponseV2 } from '/common/requests/util'
 
 /**
  * Sampler order
@@ -33,24 +34,28 @@ const base = {
   use_world_info: false,
 }
 
-export const handleKobold: ModelAdapter = async function* (opts) {
+export const handleThirdParty: ModelAdapter = async function* (opts) {
   const { members, characters, prompt, mappedSettings } = opts
 
   const body =
+    opts.gen.thirdPartyFormat === 'vllm' ||
+    opts.gen.thirdPartyFormat === 'ollama' ||
     opts.gen.thirdPartyFormat === 'ooba' ||
     opts.gen.thirdPartyFormat === 'mistral' ||
     opts.gen.thirdPartyFormat === 'tabby' ||
     opts.gen.thirdPartyFormat === 'aphrodite' ||
     opts.gen.thirdPartyFormat === 'llamacpp' ||
     opts.gen.thirdPartyFormat === 'exllamav2' ||
-    opts.gen.thirdPartyFormat === 'koboldcpp'
+    opts.gen.thirdPartyFormat === 'koboldcpp' ||
+    opts.gen.thirdPartyFormat === 'featherless' ||
+    opts.gen.thirdPartyFormat === 'arli'
       ? getThirdPartyPayload(opts)
       : { ...base, ...mappedSettings, prompt }
 
   // Kobold has a stop sequence parameter which automatically
   // halts generation when a certain token is generated
+  const stop_sequence = getStoppingStrings(opts).concat('END_OF_DIALOG')
   if (opts.gen.thirdPartyFormat === 'kobold' || opts.gen.thirdPartyFormat === 'koboldcpp') {
-    const stop_sequence = getStoppingStrings(opts).concat('END_OF_DIALOG')
     body.stop_sequence = stop_sequence
 
     // Kobold sampler order parameter must contain all 6 samplers to be valid
@@ -74,7 +79,10 @@ export const handleKobold: ModelAdapter = async function* (opts) {
   yield { prompt: body.prompt }
 
   logger.debug(`Prompt:\n${body.prompt}`)
-  logger.debug({ ...body, prompt: null }, '3rd-party payload')
+  logger.debug(
+    { ...body, prompt: null, images: null, messages: null },
+    `3rd-party payload ${opts.gen.thirdPartyFormat}`
+  )
 
   const stream = await dispatch(opts, body)
 
@@ -111,11 +119,12 @@ export const handleKobold: ModelAdapter = async function* (opts) {
     }
   }
 
+  if (opts.gen.service === 'kobold' && body.model) {
+    yield { meta: { model: body.model, fmt: opts.gen.thirdPartyFormat } }
+  }
+
   const parsed = sanitise(accum)
-  const trimmed = trimResponseV2(parsed, opts.replyAs, members, characters, [
-    'END_OF_DIALOG',
-    'You:',
-  ])
+  const trimmed = trimResponseV2(parsed, opts.replyAs, members, characters, stop_sequence)
 
   yield trimmed || parsed
 }
@@ -124,25 +133,36 @@ async function dispatch(opts: AdapterProps, body: any) {
   const baseURL = normalizeUrl(opts.gen.thirdPartyUrl || opts.user.koboldUrl)
 
   const headers: any = await getHeaders(opts)
-  if (opts.gen.thirdPartyFormat === 'aphrodite') {
-    await validateModel(opts, baseURL, body, headers)
-  }
+  await validateModel(opts, baseURL, body, headers)
 
   switch (opts.gen.thirdPartyFormat) {
     case 'llamacpp':
       return llamaStream(baseURL, body)
 
-    case 'ooba':
-    case 'aphrodite':
-    case 'tabby':
-      const url = `${baseURL}/v1/completions`
+    case 'vllm': {
+      const url = opts.gen.thirdPartyUrlNoSuffix
+        ? baseURL
+        : body.messages
+        ? `${baseURL}/v1/chat/completions`
+        : `${baseURL}/v1/completions`
       return opts.gen.streamResponse
         ? streamCompletion(url, body, headers, opts.gen.thirdPartyFormat, opts.log)
         : fullCompletion(url, body, headers, opts.gen.thirdPartyFormat, opts.log)
+    }
+
+    case 'ooba':
+    case 'aphrodite':
+    case 'tabby': {
+      const url = opts.gen.thirdPartyUrlNoSuffix ? baseURL : `${baseURL}/v1/completions`
+      return opts.gen.streamResponse
+        ? streamCompletion(url, body, headers, opts.gen.thirdPartyFormat, opts.log)
+        : fullCompletion(url, body, headers, opts.gen.thirdPartyFormat, opts.log)
+    }
 
     case 'exllamav2': {
-      const stream = await websocketStream({ url: baseURL, body })
-      return stream
+      return opts.gen.streamResponse
+        ? streamCompletion(baseURL, body, headers, opts.gen.thirdPartyFormat, opts.log)
+        : fullCompletion(baseURL, body, headers, opts.gen.thirdPartyFormat, opts.log)
     }
 
     case 'mistral': {
@@ -151,6 +171,27 @@ async function dispatch(opts: AdapterProps, body: any) {
         ? oai.streamCompletion(opts.user._id, url, headers, body, 'mistral', opts.log)
         : fullCompletion(url, body, headers, 'mistral', opts.log)
       return stream
+    }
+
+    case 'ollama': {
+      const url = `${baseURL}/api/generate`
+      return opts.gen.streamResponse
+        ? streamCompletion(url, body, headers, opts.gen.thirdPartyFormat, opts.log)
+        : fullCompletion(url, body, headers, opts.gen.thirdPartyFormat, opts.log)
+    }
+
+    case 'featherless': {
+      const url = 'https://api.featherless.ai/v1/completions'
+      return opts.gen.streamResponse
+        ? streamCompletion(url, body, headers, opts.gen.thirdPartyFormat, opts.log)
+        : fullCompletion(url, body, headers, opts.gen.thirdPartyFormat, opts.log)
+    }
+
+    case 'arli': {
+      const url = 'https://api.arliai.com/v1/completions'
+      return opts.gen.streamResponse
+        ? streamCompletion(url, body, headers, opts.gen.thirdPartyFormat, opts.log)
+        : fullCompletion(url, body, headers, opts.gen.thirdPartyFormat, opts.log)
     }
 
     default:
@@ -177,27 +218,71 @@ async function getHeaders(opts: AdapterProps) {
   const password = opts.gen.thirdPartyUrl ? opts.gen.thirdPartyKey : opts.user.thirdPartyPassword
   const headers: any = {}
 
-  if (!password) {
-    return headers
-  }
-
   switch (opts.gen.thirdPartyFormat) {
     case 'aphrodite': {
+      if (!password) return headers
       const apiKey = opts.guest ? password : decryptText(password)
       headers['x-api-key'] = apiKey
       headers['Authorization'] = `Bearer ${apiKey}`
       break
     }
 
+    case 'vllm': {
+      if (!password) return headers
+      const apiKey = opts.guest ? password : decryptText(password)
+      headers['Authorization'] = `Bearer ${apiKey}`
+      headers['Accept'] = 'application/json'
+      break
+    }
     case 'tabby': {
+      if (!password) return headers
       const apiKey = opts.guest ? password : decryptText(password)
       headers['Authorization'] = `Bearer ${apiKey}`
       break
     }
 
+    case 'featherless': {
+      if (!opts.gen.featherlessModel) {
+        throw new Error(`Featherless model not set. Check your preset`)
+      }
+
+      const key = opts.gen.thirdPartyKey || opts.user.featherlessApiKey
+      if (!key) {
+        throw new Error(
+          `Featherless API key not set. Check your Settings->AI->Third-party settings`
+        )
+      }
+
+      const apiKey = key ? (opts.guest ? key : decryptText(key)) : ''
+      if (apiKey) {
+        headers['Authorization'] = `Bearer ${apiKey}`
+      }
+      headers['Content-Type'] = 'application/json'
+      break
+    }
+
+    case 'arli': {
+      if (!opts.gen.arliModel) {
+        throw new Error(`ArliAI model not set. Check your preset`)
+      }
+
+      const key = opts.gen.thirdPartyKey || opts.user.arliApiKey
+      if (!key) {
+        throw new Error(`ArliAI API key not set. Check your Settings->AI->Third-party settings`)
+      }
+
+      const apiKey = key ? (opts.guest ? key : decryptText(key)) : ''
+      if (apiKey) {
+        headers['Authorization'] = `Bearer ${apiKey}`
+      }
+      headers['Content-Type'] = 'application/json'
+      break
+    }
+
     case 'mistral': {
       const key = opts.user.mistralKey
-      if (!key) throw new Error(`Mistral API key not set. Check your AI->3rd-party settings`)
+      if (!key)
+        throw new Error(`Mistral API key not set. Check your Settings->AI->Third-party settings`)
 
       const apiKey = opts.guest ? key : decryptText(key)
       headers['Authorization'] = `Bearer ${apiKey}`
@@ -291,7 +376,7 @@ const streamCompletion = async function* (
     parse: false,
     json: true,
     headers: {
-      Accept: `text/event-stream`,
+      Accept: format === 'featherless' ? 'application/json' : `text/event-stream`,
       ...headers,
     },
   })
@@ -304,6 +389,11 @@ const streamCompletion = async function* (
     const events = requestStream(resp, format)
 
     for await (const event of events) {
+      if (event?.error) {
+        yield { error: event.error }
+        return
+      }
+
       if (!event.data) continue
       const data = JSON.parse(event.data) as {
         index?: number
@@ -341,7 +431,7 @@ const streamCompletion = async function* (
       }
 
       tokens.push(token)
-      yield { token: token }
+      yield { token }
     }
   } catch (err: any) {
     yield { error: `${format} streaming request failed: ${err.message || err}` }
@@ -358,19 +448,53 @@ const streamCompletion = async function* (
 }
 
 async function validateModel(opts: AdapterProps, baseURL: string, payload: any, headers: any) {
-  if (opts.gen.thirdPartyFormat !== 'aphrodite') return
+  if (opts.gen.thirdPartyFormat === 'aphrodite') {
+    const res = await needle('get', `${baseURL}/v1/models`, { headers, json: true })
 
-  const res = await needle('get', `${baseURL}/v1/models`, { headers, json: true })
+    const code = res.statusCode ?? 400
+    if (code >= 400) {
+      return
+    }
 
-  const code = res.statusCode ?? 400
-  if (code >= 400) {
-    return
+    if (!Array.isArray(res.body.data)) return
+    const names = res.body.data.map((data: any) => data.id) as string[]
+
+    if (!payload.model || !names.includes(payload.model)) {
+      payload.model = names[0]
+    }
   }
 
-  if (!Array.isArray(res.body.data)) return
-  const names = res.body.data.map((data: any) => data.id) as string[]
+  if (opts.gen.thirdPartyFormat === 'ollama') {
+    const res = await needle('get', `${baseURL}/api/tags`, { headers, json: true })
+    const code = res.statusCode ?? 400
+    if (code >= 400) {
+      return
+    }
 
-  if (!payload.model || !names.includes(payload.model)) {
-    payload.model = names[0]
+    if (!Array.isArray(res.body.models)) return
+    const models = res.body.models as Array<{ name: string; model: string }>
+    if (!models.length) return
+
+    if (!payload.model) {
+      payload.model = models[0].name
+      return
+    }
+
+    const paylow: string = (payload.model || '').toLowerCase()
+    const match = models.find((m) => {
+      const low = m.name.toLowerCase()
+      if (low === paylow) return true
+      if (low.includes(':')) {
+        const [name] = m.name.split(':')
+        if (name === paylow) return true
+        if (name.startsWith(paylow)) return true
+      }
+
+      return low.startsWith(paylow)
+    })
+    if (!match) {
+      payload.model = models[0].name
+      return
+    }
   }
 }

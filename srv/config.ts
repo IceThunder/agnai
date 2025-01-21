@@ -51,7 +51,10 @@ export const config = {
   clusterWorkers: +env('CLUSTERING', ''),
   auth: {
     inferenceKey: env('INFERENCE_KEY', ''),
-    urls: env('AUTH_URLS', 'https://chara.cards,https://dev.chara.cards')
+    urls: env(
+      'AUTH_URLS',
+      'https://chara.cards,https://dev.chara.cards,https://agnai.cards,https://char.as,https://dev.char.as,https://dev.agnai.cards'
+    )
       .split(',')
       .map((name) => name.trim())
       .filter((name) => !!name.trim()),
@@ -64,6 +67,7 @@ export const config = {
   host: env('APP_HOST', '0.0.0.0'),
   port: +env('PORT', '3001'),
   assetUrl: env('ASSET_URL', ''),
+  cdnHostname: env('CDN_HOSTNAME', ''),
   assetFolder: env('ASSET_FOLDER', resolve(__dirname, '..', 'dist', 'assets')),
   extraFolder: env('EXTRA_FOLDER', ''),
   billing: {
@@ -79,6 +83,12 @@ export const config = {
     port: env('DB_PORT', '27017'),
     uri: env('DB_URI', ''),
     verbose: !!env('DB_VERBOSE', ''),
+  },
+  broadcast: {
+    host: env('BROADCAST_HOST', '127.0.0.1'),
+    port: +env('BROADCAST_PORT', '6379'),
+    user: env('BROADCOST_USER', ''),
+    pass: env('BROADCAST_PASSWORD', ''),
   },
   redis: {
     host: env('REDIS_HOST', '127.0.0.1'),
@@ -161,8 +171,13 @@ if (config.ui.inject) {
 
 if (config.jwtPrivateKey) {
   try {
-    const file = readFileSync(config.jwtPrivateKey).toString('utf-8')
-    config.jwtPrivateKey = file
+    if (config.jwtPrivateKey.startsWith('"-----')) {
+      const key = JSON.parse(config.jwtPrivateKey)
+      config.jwtPrivateKey = key
+    } else {
+      const file = readFileSync(config.jwtPrivateKey).toString('utf-8')
+      config.jwtPrivateKey = file
+    }
   } catch {}
 }
 

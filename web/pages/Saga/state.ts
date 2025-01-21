@@ -2,7 +2,6 @@ import { neat, now } from '/common/util'
 import { createStore } from '/web/store/create'
 import { sagaApi } from '/web/store/data/saga'
 import { parseTemplateV2 } from '/common/guidance/v2'
-import { msgsApi } from '/web/store/data/messages'
 import { toastStore } from '/web/store'
 import { v4 } from 'uuid'
 import { replaceTags } from '/common/presets/templates'
@@ -11,6 +10,7 @@ import { imageApi } from '/web/store/data/image'
 import { createDebounce } from '/web/shared/util'
 import { TemplateExampleID, exampleTemplates } from './examples'
 import { Saga } from '/common/types'
+import { genApi } from '/web/store/data/inference'
 
 type SagaState = {
   template: Saga.Template
@@ -302,7 +302,7 @@ export const sagaStore = createStore<SagaState>(
           responses: [],
         },
       }
-      const result = await msgsApi.guidance({
+      const result = await genApi.guidance({
         requestId,
         prompt: replaceTags(init, state.format),
         previous,
@@ -421,7 +421,6 @@ export const sagaStore = createStore<SagaState>(
       }
 
       prompt = replaceTags(prompt, state.format)
-      console.log(prompt)
       const requestId = v4()
       const original = state.responses.slice()
 
@@ -430,7 +429,7 @@ export const sagaStore = createStore<SagaState>(
           responses: state.responses.concat({ requestId, input: text, response: '' }),
         }),
       }
-      const result = await msgsApi
+      const result = await genApi
         .guidance({
           requestId,
           prompt,
@@ -447,7 +446,6 @@ export const sagaStore = createStore<SagaState>(
         yield { busy: false, state: Object.assign({}, state, { responses: original }) }
         return
       }
-      console.log(JSON.stringify(result, null, 2))
       onDone()
       debounceImage(true)
 
@@ -490,7 +488,7 @@ const [debounceImage] = createDebounce(async (auto?: boolean) => {
     sagaStore.setState({ image: { ...prev, loading: false, state: 'done', data: res.data } })
   } catch (ex: any) {
     sagaStore.setState({ image: { ...prev, loading: false, state: 'done' } })
-    toastStore.error(`Failed to generate image. ${ex.message || ''}`)
+    toastStore.error(`Failed to generate image. ${ex.message || ex.error || ''}`)
   }
 }, 100)
 

@@ -1,22 +1,70 @@
 import { createHooks, recommended } from '@css-hooks/solid'
 import * as lf from 'localforage'
 import { UnwrapBody, Validator, assertValid } from '/common/valid'
-import {
-  ADAPTER_LABELS,
-  AIAdapter,
-  PresetAISettings,
-  ThirdPartyFormat,
-  adapterSettings,
-} from '../../common/adapters'
+import { AIAdapter, PresetAISettings, ThirdPartyFormat } from '/common/adapters'
 import type { Option } from './Select'
-import { createEffect, onCleanup } from 'solid-js'
-import { UserState, settingStore, userStore } from '../store'
-import { AppSchema } from '/common/types'
+import { Component, createEffect, JSX, onCleanup } from 'solid-js'
+import type { UserState } from '../store'
+import { AppSchema, UI } from '/common/types'
 import { deepClone } from '/common/util'
+import { getRootRgb } from './colors'
+import { getStore } from '../store/create'
+import { ADAPTER_SETTINGS } from './PresetSettings/settings'
+import { PresetState } from './PresetSettings/types'
 
 const [css, hooks] = createHooks(recommended)
 
 export { hooks, css }
+
+export type ExtractProps<TComponent> = TComponent extends Component<infer TProps>
+  ? TProps
+  : TComponent
+
+type ChanceArg<T extends keyof Chance.Chance> = Chance.Chance[T] extends (arg: infer U) => any
+  ? U
+  : never
+
+export async function random<T extends keyof Chance.Chance>(kind: T, opts: ChanceArg<T>) {
+  const Chance = await import('chance').then((mod) => new mod.Chance())
+
+  const func: any = Chance[kind]
+  if (typeof func === 'function') {
+    return func.call(Chance, opts)
+  }
+
+  return ''
+}
+
+export type ComponentEmitter<T extends string> = {
+  emit: { [key in T]: () => void }
+  on: ComponentSubscriber<T>
+}
+
+export type ComponentSubscriber<T> = (event: T, callback: () => any) => void
+
+export function createEmitter<T extends string>(...events: T[]) {
+  let emit: any = {}
+  const listeners: Array<{ event: T; callback: () => void }> = []
+
+  const on = (event: T, callback: () => void) => {
+    listeners.push({ event, callback })
+  }
+
+  for (const event of events) {
+    emit[event] = () => {
+      for (const cb of listeners) {
+        if (cb.event === event) cb.callback()
+      }
+    }
+  }
+
+  onCleanup(() => {
+    listeners.length = 0
+    emit = undefined
+  })
+
+  return { emit, on } as ComponentEmitter<T>
+}
 
 export function downloadJson(content: string | object, filename: string = 'agnai_export') {
   const output = encodeURIComponent(
@@ -28,6 +76,15 @@ export function downloadJson(content: string | object, filename: string = 'agnai
   anchor.download = `${filename}.json`
   anchor.click()
   URL.revokeObjectURL(anchor.href)
+}
+
+export function getHeaderBg(mode: UI.UISettings['mode']) {
+  mode
+  const rgb = getRootRgb('bg-900')
+  const styles: JSX.CSSProperties = {
+    background: rgb ? `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.7)` : 'bg-900',
+  }
+  return styles
 }
 
 export function getMaxChatWidth(chatWidth: UserState['ui']['chatWidth']) {
@@ -54,6 +111,7 @@ export function getMaxChatWidth(chatWidth: UserState['ui']['chatWidth']) {
 export const storage = {
   getItem,
   setItem,
+
   removeItem,
   clear,
 
@@ -147,9 +205,19 @@ export function getAssetPrefix() {
   return assetPrefix
 }
 
+export function isBase64(file: string) {
+  if (file.startsWith('/') || file.startsWith('http')) return false
+  if (file.startsWith('data:')) return true
+
+  return file.length > 500
+}
+
 export function getAssetUrl(filename: string) {
   if (filename.startsWith('http:') || filename.startsWith('https:') || filename.startsWith('data:'))
     return filename
+
+  // Likely base64
+  if (filename.length > 500) return filename
 
   const isFile =
     filename.startsWith('/assets') ||
@@ -170,26 +238,12 @@ export function getAssetUrl(filename: string) {
 
 export function setAssetPrefix(prefix: string) {
   if (!prefix && assetPrefix) return
+  // if (!prefix.startsWith('http')) {
+  //   prefix = `https://${prefix}`
+  // }
 
-  storage.setItem(PREFIX_CACHE_KEY, prefix)
+  storage.localSetItem(PREFIX_CACHE_KEY, prefix)
   assetPrefix = prefix
-}
-
-export function getForm<T = {}>(evt: Event | HTMLFormElement): T {
-  evt.preventDefault?.()
-  const target = evt instanceof HTMLFormElement ? evt : (evt.target as HTMLFormElement)
-  const form = new FormData(target as HTMLFormElement)
-
-  const disable = enableAll(target)
-
-  const body = Array.from(form.entries()).reduce((prev, [key, value]) => {
-    Object.assign(prev, { [key]: value })
-    return prev
-  }, {})
-
-  disable()
-
-  return body as any
 }
 
 type Field = HTMLSelectElement | HTMLInputElement
@@ -227,46 +281,6 @@ export function getStrictForm<T extends Validator>(
   return values
 }
 
-export function setFormField(ref: HTMLFormElement, field: string, value: any) {
-  const elem = document.querySelector(`.form-field[name="${field}"]`)
-  if (!elem) {
-    console.warn(`[${field}] Could not update field: Element not found`)
-    return
-  }
-
-  if ('value' in elem) {
-    elem.value = value
-  }
-}
-
-export function setFormFields(ref: HTMLFormElement, update: Record<string, any>) {
-  for (const [field, value] of Object.entries(update)) {
-    setFormField(ref, field, value)
-  }
-}
-
-export function getFormEntries(evt: Event | HTMLFormElement): Array<[string, string]> {
-  evt.preventDefault?.()
-  const target = evt instanceof HTMLFormElement ? evt : (evt.target as HTMLFormElement)
-  const disable = enableAll(target)
-  const form = new FormData(target as HTMLFormElement)
-  const entries = Array.from(form.entries()).map(
-    ([key, value]) => [key, value.toString()] as [string, string]
-  )
-
-  const dangling = target.querySelectorAll('input[type="checkbox"]') as NodeListOf<HTMLInputElement>
-  for (const input of dangling) {
-    const prev = entries.find((e) => e[0] === input.id)
-    if (prev) continue
-
-    entries.push([input.id, input.checked ? 'on' : ''])
-  }
-
-  disable()
-
-  return entries
-}
-
 export function formatDate(value: string | number | Date) {
   const date = new Date(value)
   const str = date.toString()
@@ -275,6 +289,45 @@ export function formatDate(value: string | number | Date) {
   const time = str.slice(16, 24)
 
   return `${month} ${day} ${time}`
+}
+
+export function toShortDuration(valueSecs: number | Date | string, parts?: number) {
+  if (valueSecs instanceof Date) {
+    valueSecs = Math.round((Date.now() - valueSecs.valueOf()) / 1000)
+  } else if (typeof valueSecs === 'string') {
+    valueSecs = Math.round((Date.now() - new Date(valueSecs).valueOf()) / 1000)
+  }
+
+  if (valueSecs < 60) {
+    return '<1m'
+  }
+  const {
+    duration: [days, hours, minutes, seconds],
+  } = toRawDuration(valueSecs)
+
+  if (parts) {
+    const sects: string[] = []
+    if (days) sects.push(`${days}d`)
+    if (hours) sects.push(`${hours}h`)
+    if (minutes) sects.push(`${minutes}m`)
+    if (seconds) sects.push(`${seconds}s`)
+
+    return sects.slice(0, parts).join(' ')
+  }
+
+  if (days) {
+    return `${days}d`
+  }
+
+  if (hours) {
+    return `${hours}h`
+  }
+
+  if (minutes) {
+    return `${minutes}m`
+  }
+
+  return `${seconds}s`
 }
 
 export function toDuration(valueSecs: number | Date, full?: boolean) {
@@ -336,10 +389,6 @@ function toRawDuration(valueSecs: number) {
   }
 }
 
-export function adaptersToOptions(adapters: AIAdapter[]): Option[] {
-  return adapters.map((adp) => ({ label: ADAPTER_LABELS[adp], value: adp }))
-}
-
 export function toEntityMap<T extends { _id: string }>(list: T[]): Record<string, T> {
   const map = list.reduce((prev, curr) => {
     prev[curr._id] = curr
@@ -347,6 +396,20 @@ export function toEntityMap<T extends { _id: string }>(list: T[]): Record<string
   }, {} as Record<string, T>)
 
   return map
+}
+
+export function uniqueBy<T>(list: T[], key: keyof T) {
+  const set = new Set<any>()
+  const next: T[] = []
+
+  for (const item of list) {
+    if (!set.has(item[key])) {
+      next.push(item)
+      set.add(item[key])
+    }
+  }
+
+  return next
 }
 
 /**
@@ -472,16 +535,15 @@ export function isDirty<T extends {}>(original: T, compare: T): boolean {
 }
 
 export function serviceHasSetting(
-  service: AIAdapter | undefined,
-  format: ThirdPartyFormat | undefined,
+  state: Pick<PresetState, 'service' | 'thirdPartyFormat'>,
   ...props: Array<keyof PresetAISettings>
 ) {
-  if (!service) {
+  if (!state.service) {
     return true
   }
 
   for (const prop of props) {
-    if (isValidServiceSetting(service, format, prop)) {
+    if (isValidServiceSetting(state, prop)) {
       return true
     }
   }
@@ -489,10 +551,12 @@ export function serviceHasSetting(
   return false
 }
 
-export function getAISettingServices(prop?: keyof PresetAISettings) {
+export function getAISettingServices(prop?: keyof AppSchema.GenSettings) {
   if (!prop) return
-  const cfg = settingStore((s) => s.config)
-  const base = adapterSettings[prop]
+  const cfg = getStore('settings')((s) => s.config)
+  if (!isPresetSetting(prop)) return
+
+  const base = ADAPTER_SETTINGS[prop]
   const names: Array<AIAdapter | ThirdPartyFormat> = []
   for (const reg of cfg.registered) {
     if (reg.options.includes(prop)) names.push(reg.name)
@@ -501,23 +565,29 @@ export function getAISettingServices(prop?: keyof PresetAISettings) {
   return base?.concat(names)
 }
 
+function isPresetSetting(key: string): key is keyof PresetAISettings {
+  return key in ADAPTER_SETTINGS === true
+}
+
 export function isValidServiceSetting(
-  service?: AIAdapter,
-  format?: AppSchema.GenSettings['thirdPartyFormat'],
+  state: Pick<PresetState, 'service' | 'thirdPartyFormat'>,
   prop?: keyof PresetAISettings
 ) {
   const services = getAISettingServices(prop)
-
   // Setting does not declare itself as a service setting
-  if (!services || !service) return true
+  if (!services || !state.service) return true
 
-  if (services.includes(service)) return true
-  if (!format) return false
+  if (services.includes(state.service)) return true
+  if (!state.thirdPartyFormat) {
+    return false
+  }
 
-  if (service !== 'kobold') return false
+  if (state.service !== 'kobold') {
+    return false
+  }
 
   for (const srv of services) {
-    if (srv === format) return true
+    if (srv === state.thirdPartyFormat) return true
   }
 
   return false
@@ -542,6 +612,29 @@ export function applyDotProperty<T>(obj: T, property: string, value: any) {
   }
 
   return obj
+}
+
+export function applyStoreProperty<T>(obj: T, property: string, value: any) {
+  const props = property.split('.')
+
+  let base: any = JSON.parse(JSON.stringify(obj || {}))
+  let ref: any = base
+
+  for (let i = 0; i < props.length; i++) {
+    const prop = props[i]
+    if (i === props.length - 1) {
+      ref[prop] = value
+      break
+    }
+
+    if (!ref[prop]) {
+      ref[prop] = {}
+    }
+
+    ref = ref[prop]
+  }
+
+  return base
 }
 
 export function appendFormOptional(
@@ -614,8 +707,8 @@ export function asyncFrame() {
 }
 
 export function getUsableServices() {
-  const { user } = userStore.getState()
-  const { config } = settingStore.getState()
+  const { user } = getStore('user').getState()
+  const { config } = getStore('settings').getState()
 
   const services: AIAdapter[] = []
 
@@ -680,6 +773,10 @@ export function isUsableService(
     case 'petals': {
       return true
     }
+
+    case 'venus': {
+      return !!user?.adapterConfig?.venus?.apiKeySet
+    }
   }
 
   return false
@@ -707,13 +804,13 @@ export type FieldUpdater = (index: number, path: string) => (ev: any) => void
  */
 export function useRowHelper<T extends object>(opts: {
   signal: [() => T[], (v: T[]) => void]
-  empty: T
+  empty: () => T
 }) {
   const items = opts.signal[0]
   const setItems = opts.signal[1]
 
   const add = () => {
-    const next = items().concat(deepClone(opts.empty))
+    const next = items().concat(deepClone(opts.empty()))
     setItems(next)
   }
 
@@ -725,7 +822,9 @@ export function useRowHelper<T extends object>(opts: {
 
   const updateItem = (index: number, field: string, value: any) => {
     const prev = items()
-    const item = setProperty(prev[index], field, value)
+    const base = getProperty(opts.empty(), field)
+    const parsed = typeof base === 'number' ? +value : value
+    const item = setProperty(prev[index], field, parsed)
 
     const next = prev
       .slice(0, index)
@@ -742,6 +841,7 @@ export function useRowHelper<T extends object>(opts: {
       }
 
       // Textarea and Input fields
+
       if ('currentTarget' in ev) {
         return updateItem(index, field, ev.currentTarget.value)
       }
@@ -772,6 +872,20 @@ function setProperty(obj: any, path: string, value: any): any {
     ...obj,
     [head]: rest.length ? setProperty(obj[head], rest.join('.'), value) : value,
   }
+}
+
+function getProperty(obj: any, path: string) {
+  const [head, ...props] = path.split('.')
+
+  let curr = obj[head]
+  if (curr === undefined) return
+
+  for (const prop of props) {
+    if (curr === undefined) return
+    curr = curr[prop]
+  }
+
+  return curr
 }
 
 export const sticky = {

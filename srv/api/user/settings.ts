@@ -9,18 +9,18 @@ import { get } from '../request'
 import { getAppConfig } from '../settings'
 import { entityUpload, handleForm } from '../upload'
 import { errors, handle, StatusError } from '../wrap'
-import { sendAll } from '../ws'
+import { sendAll, sendOne } from '../ws'
 import { v4 } from 'uuid'
 import { getRegisteredAdapters } from '/srv/adapter/register'
 import { AIAdapter } from '/common/adapters'
 import { config } from '/srv/config'
-import { toArray } from '/common/util'
+import { getUserSubscriptionTier, toArray } from '/common/util'
 import { UI } from '/common/types'
-import { publishOne } from '../ws/handle'
 import { getLanguageModels } from '/srv/adapter/replicate'
-import { getUser } from '/srv/db/user'
+import { getUser, toSafeUser } from '/srv/db/user'
+import { getCachedTiers } from '/srv/db/subscriptions'
 
-export const getInitialLoad = handle(async ({ userId }) => {
+export const getInitialLoad = handle(async ({ userId, query }) => {
   const replicate = await getLanguageModels()
   if (config.ui.maintenance) {
     const appConfig = await getAppConfig()
@@ -29,7 +29,7 @@ export const getInitialLoad = handle(async ({ userId }) => {
 
   const [profile, user, presets, books, scenarios] = await Promise.all([
     store.users.getProfile(userId!),
-    getSafeUserConfig(userId!),
+    getSafeUserConfig(userId!, query.seed as string),
     store.presets.getUserPresets(userId!),
     store.memory.getBooks(userId!),
     store.scenario.getScenarios(userId!),
@@ -127,6 +127,22 @@ export const deleteMistralKey = handle(async ({ userId }) => {
   return { success: true }
 })
 
+export const deleteFeatherlessKey = handle(async ({ userId }) => {
+  await store.users.updateUser(userId!, {
+    featherlessApiKey: '',
+  })
+
+  return { success: true }
+})
+
+export const deleteArliKey = handle(async ({ userId }) => {
+  await store.users.updateUser(userId!, {
+    arliApiKey: '',
+  })
+
+  return { success: true }
+})
+
 export const deleteElevenLabsKey = handle(async ({ userId }) => {
   await store.users.updateUser(userId!, {
     elevenLabsApiKey: '',
@@ -140,7 +156,7 @@ export const updateUI = handle(async ({ userId, body }) => {
 
   await store.users.updateUserUI(userId, body)
 
-  publishOne(userId, { type: 'ui-update', ui: body })
+  sendOne(userId, { type: 'ui-update', ui: body })
 
   return { success: true }
 })
@@ -156,11 +172,13 @@ const validConfig = {
   oobaUrl: 'string?',
   hordeApiKey: 'string?',
   hordeKey: 'string?',
-  hordeModel: 'string?',
+  hordeModel: 'any?',
   hordeModels: ['string?'],
-  hordeWorkers: ['string'],
+  hordeWorkers: ['string?'],
   oaiKey: 'string?',
   mistralKey: 'string?',
+  featherlessApiKey: 'string?',
+  arliApiKey: 'string?',
   scaleUrl: 'string?',
   scaleApiKey: 'string?',
   claudeApiKey: 'string?',
@@ -169,7 +187,9 @@ const validConfig = {
   texttospeech: 'any?',
   images: 'any?',
   defaultPreset: 'string?',
+  chargenPreset: 'string?',
   adapterConfig: 'any?',
+  disableLTM: 'boolean?',
 } as const
 
 /**
@@ -185,12 +205,47 @@ export const updatePartialConfig = handle(async ({ userId, body }) => {
       scaleApiKey: 'string?',
       claudeApiKey: 'string?',
       elevenLabsApiKey: 'string?',
+      arliApiKey: 'string?',
       patreonToken: 'string?',
+      announcement: 'string?',
+      defaultPreset: 'string?',
+      chargenPreset: 'string?',
+      images: 'any?',
+      disableLTM: 'boolean?',
+      imageDefaults: 'any?',
     },
     body
   )
 
   const update: Partial<AppSchema.User> = {}
+
+  if (body.defaultPreset) {
+    const preset = await store.presets.getUserPreset(body.defaultPreset)
+    if (!preset || preset.userId !== userId) {
+      throw new StatusError(`Invalid preset`, 403)
+    }
+    update.defaultPreset = body.defaultPreset
+  }
+
+  if (body.imageDefaults) {
+    update.imageDefaults = body.imageDefaults
+  }
+
+  if (body.disableLTM !== undefined) {
+    update.disableLTM = body.disableLTM
+  }
+
+  if (body.chargenPreset) {
+    const preset = await store.presets.getUserPreset(body.chargenPreset)
+    if (!preset || preset.userId !== userId) {
+      throw new StatusError(`Invalid preset`, 403)
+    }
+    update.chargenPreset = body.chargenPreset
+  }
+
+  if (body.announcement) {
+    update.announcement = body.announcement
+  }
 
   if (body.novelApiKey) {
     await verifyNovelKey(body.novelApiKey)
@@ -224,6 +279,10 @@ export const updatePartialConfig = handle(async ({ userId, body }) => {
     update.thirdPartyPassword = encryptText(body.thirdPartyPassword)
   }
 
+  if (body.images) {
+    update.images = body.images
+  }
+
   await store.users.updateUser(userId, update)
   const next = await getSafeUserConfig(userId)
   return next
@@ -238,10 +297,17 @@ export const updateConfig = handle(async ({ userId, body }) => {
   }
 
   const update: Partial<AppSchema.User> = {
-    hordeWorkers: body.hordeWorkers,
     hordeUseTrusted: body.hordeUseTrusted ?? false,
     defaultPreset: body.defaultPreset || '',
     useLocalPipeline: body.useLocalPipeline,
+  }
+
+  if (body.hordeWorkers) {
+    update.hordeWorkers = toArray(body.hordeWorkers)
+  }
+
+  if (body.disableLTM !== undefined) {
+    update.disableLTM = body.disableLTM
   }
 
   if (body.hordeKey || body.hordeApiKey) {
@@ -290,6 +356,8 @@ export const updateConfig = handle(async ({ userId, body }) => {
 
   if (body.hordeModels) {
     update.hordeModel = toArray(body.hordeModels)
+  } else if (body.hordeModel) {
+    update.hordeModel = toArray(body.hordeModel)
   }
 
   if (body.novelModel) {
@@ -313,6 +381,14 @@ export const updateConfig = handle(async ({ userId, body }) => {
 
   if (body.mistralKey) {
     update.mistralKey = encryptText(body.mistralKey!)
+  }
+
+  if (body.featherlessApiKey) {
+    update.featherlessApiKey = encryptText(body.featherlessApiKey)
+  }
+
+  if (body.arliApiKey) {
+    update.arliApiKey = encryptText(body.arliApiKey)
   }
 
   if (body.scaleUrl !== undefined) update.scaleUrl = body.scaleUrl
@@ -353,6 +429,11 @@ export const updateConfig = handle(async ({ userId, body }) => {
   await store.users.updateUser(userId!, update)
   const user = await getSafeUserConfig(userId!)
   return user
+})
+
+export const removeProfileAvatar = handle(async (req) => {
+  const profile = await store.users.updateProfile(req.userId, { avatar: null as any })
+  return profile
 })
 
 export const updateProfile = handle(async (req) => {
@@ -423,67 +504,14 @@ async function verifyHordeKey(key: string) {
   return user.result?.username
 }
 
-export async function getSafeUserConfig(userId: string) {
+export async function getSafeUserConfig(userId: string, seed?: string) {
   const user = await store.users.getUser(userId!)
   if (!user) return
 
-  if (user.patreon) {
-    user.patreon.access_token = ''
-    user.patreon.refresh_token = ''
-    user.patreon.scope = ''
-    user.patreon.token_type = ''
-  }
+  const sub = getUserSubscriptionTier(user, getCachedTiers())
+  const next = sub ? { type: sub?.type, level: sub?.level, tierId: sub.tier._id } : undefined
+  await store.users.updateUser(userId, { sub: next })
+  user.sub = next
 
-  if (user.novelApiKey) {
-    user.novelApiKey = ''
-  }
-
-  user.hordeKey = ''
-  user.apiKey = user.apiKey ? '*********' : 'Not set'
-
-  if (user.oaiKey) {
-    user.oaiKeySet = true
-    user.oaiKey = ''
-  }
-
-  if (user.mistralKey) {
-    user.mistralKeySet = true
-    user.mistralKey = ''
-  }
-
-  if (user.scaleApiKey) {
-    user.scaleApiKeySet = true
-    user.scaleApiKey = ''
-  }
-
-  if (user.claudeApiKey) {
-    user.claudeApiKey = ''
-    user.claudeApiKeySet = true
-  }
-
-  if (user.thirdPartyPassword) {
-    user.thirdPartyPassword = ''
-    user.thirdPartyPasswordSet = true
-  }
-
-  if (user.elevenLabsApiKey) {
-    user.elevenLabsApiKey = ''
-    user.elevenLabsApiKeySet = true
-  }
-
-  for (const svc of getRegisteredAdapters()) {
-    if (!user.adapterConfig) break
-    if (!user.adapterConfig[svc.name]) continue
-
-    const secrets = svc.settings.filter((opt) => opt.secret)
-
-    for (const secret of secrets) {
-      if (user.adapterConfig[svc.name]![secret.field]) {
-        user.adapterConfig[svc.name]![secret.field] = ''
-        user.adapterConfig[svc.name]![secret.field + 'Set'] = true
-      }
-    }
-  }
-
-  return user
+  return toSafeUser(user, seed)
 }

@@ -1,7 +1,7 @@
 import { A } from '@solidjs/router'
 import { assertValid } from '/common/valid'
 import { Download, Plus, Trash, Upload, X, Edit, FileX, FileCheck } from 'lucide-solid'
-import { Component, createEffect, createSignal, For, Show } from 'solid-js'
+import { Component, createSignal, For, onMount, Show } from 'solid-js'
 import { AppSchema } from '../../../common/types/schema'
 import Button from '../../shared/Button'
 import FileInput, { FileInputResult, getFileAsString } from '../../shared/FileInput'
@@ -12,6 +12,103 @@ import { SolidCard } from '/web/shared/Card'
 import EmbedContent from './EmbedContent'
 import { embedApi } from '/web/store/embeddings'
 import { EditEmbedModal } from '/web/shared/EditEmbedModal'
+import { Page } from '/web/Layout'
+
+type STEntry = {
+  addMenu: boolean
+  case_sensitive: boolean
+  characterFilter?: any
+  comment: string
+  constant: boolean
+  content: string
+  depth: number
+  disable: boolean
+  displayIndex: 1
+  enabled: boolean
+  excludeRecursion: boolean
+  extensions: {
+    addMemo: boolean
+    characterFilter?: any
+    depth: number
+    displayIndex: number
+    excludeRecursion: number
+    probability: number
+    selectiveLogic: number
+    useProbability: number
+    weight: number
+  }
+  id: number
+  uid: number
+  name: string
+  order: number
+  keys: string[]
+
+  insertion_order: number
+
+  key: string[]
+  keysecondary: string[]
+  position: any
+  priority: number
+
+  /** 1-100 */
+  probability: number
+
+  secondary_keys: string[]
+  selective: boolean
+  selectiveLogic: number
+  useProbability: boolean
+}
+
+type STVenusBook = {
+  description: string
+  entries: Record<string, STEntry>
+  extensions: any
+  is_creation: boolean
+  name: string
+  recursive_scanning: boolean
+  scan_depth: number
+  token_budget: number
+}
+
+type STExportedBook = {
+  entries: Record<
+    string,
+    {
+      uid: number
+      key: string[]
+      keysecondary: string[]
+      comment: string
+      content: string
+      constant: boolean
+      selective: boolean
+      selectiveLogic: any
+      addMenu: boolean
+      order: number
+      position: any
+      disable: boolean
+      excludeRecursion: boolean
+      probability: number
+      useProbability: boolean
+      depth: number
+      group: string
+      scanDepth?: number
+      caseSensitive?: boolean
+      matchWholeWorlds?: boolean
+      automationId?: string
+      role?: string
+      displayIndex: number
+      preventRecursion: boolean
+      groupOverride: boolean
+      groupWeight: number
+      vectorized: boolean
+      delayUntilRecursion: boolean
+      useGroupScoring?: boolean
+      sticky: number
+      cooldown: number
+      delay: number
+    }
+  >
+}
 
 export const EmbedsTab: Component = (props) => {
   const state = memoryStore()
@@ -68,12 +165,12 @@ export const BooksTab: Component = (props) => {
     memoryStore.remove(book._id)
   }
 
-  createEffect(() => {
+  onMount(() => {
     memoryStore.getAll()
   })
 
   return (
-    <>
+    <Page>
       <PageHeader
         title="Memory - Books"
         subtitle={
@@ -141,7 +238,7 @@ export const BooksTab: Component = (props) => {
         close={() => setDeleting()}
         show={!!deleting()}
       />
-    </>
+    </Page>
   )
 }
 
@@ -160,11 +257,12 @@ const ImportMemoryModal: Component<ImportProps> = (props) => {
   const updateJson = async (files: FileInputResult[]) => {
     if (!files.length) return setJson()
     try {
-      const content = await getFileAsString(files[0])
+      const file = files[0]
+      const content = await getFileAsString(file)
       const json = JSON.parse(content)
-      validateBookJson(json)
-      setJson(json)
-      toastStore.success('Character file accepted')
+      const book = validateBookJson(file.file.name, json)
+      setJson(book || json)
+      toastStore.success('Memory book accepted')
     } catch (ex: any) {
       toastStore.warn(`Invalid memory book JSON. ${ex.message}`)
     }
@@ -205,8 +303,18 @@ function encodeBook(book: AppSchema.MemoryBook) {
   return encodeURIComponent(JSON.stringify(body, null, 2))
 }
 
-function validateBookJson(json: any) {
+function validateBookJson(filename: string, json: any): AppSchema.MemoryBook | void {
+  if (isSTFormat(json)) {
+    return convertFromSTVenus(json)
+  }
+
+  if (isSTExported(json)) {
+    return convertFromSTExported(filename, json)
+  }
+
   const book = json as AppSchema.MemoryBook
+  json.name = json.name || 'Imported Book'
+  json.kind = 'memory'
 
   const entries: AppSchema.MemoryEntry[] = []
 
@@ -258,4 +366,96 @@ function toNumber(value: any) {
 
   if (isNaN(num)) return 0
   return num
+}
+
+function isSTFormat(json: any): json is STVenusBook {
+  return 'is_creation' in json && 'recursive_scanning' in json
+}
+
+function convertFromSTVenus(json: STVenusBook): AppSchema.MemoryBook {
+  const base: AppSchema.MemoryBook = {
+    _id: '',
+    name: json.name || 'Imported Book',
+    kind: 'memory',
+    userId: '',
+    description: json.description,
+    extensions: { ...json, entries: {} },
+    entries: [],
+    recursiveScanning: json.recursive_scanning ?? false,
+    scanDepth: json.scan_depth ?? 50,
+    tokenBudget: json.token_budget ?? 500,
+  }
+
+  const entries = Object.values(json.entries)
+    .sort((l, r) => l.id - r.id)
+    .map<AppSchema.MemoryEntry>((entry, i) => ({
+      priority: entry.priority,
+      weight: entry.extensions.weight,
+      comment: entry.comment,
+      constant: entry.constant,
+      id: i,
+      name: entry.name,
+      keywords: entry.keys,
+      entry: entry.content,
+      enabled: entry.enabled,
+
+      // V2
+      position: entry.position,
+      excludeRecursion: entry.excludeRecursion,
+      probability: entry.probability,
+      useProbability: entry.useProbability,
+      secondaryKeys: entry.secondary_keys,
+      selective: entry.selective,
+      selectiveLogic: entry.selectiveLogic,
+    }))
+
+  base.entries = entries
+  return base
+}
+
+function isSTExported(json: any): json is STExportedBook {
+  const keys = Object.keys(json || {}).filter((key) => key !== 'originalData')
+  return keys.length === 1 && keys[0] === 'entries'
+}
+
+function convertFromSTExported(filename: string, json: STExportedBook): AppSchema.MemoryBook {
+  const base: AppSchema.MemoryBook = {
+    _id: '',
+    name: filename.replace('.json', '') || 'Imported Book',
+    kind: 'memory',
+    userId: '',
+    description: '',
+    extensions: {},
+    entries: [],
+    recursiveScanning: false,
+    scanDepth: 50,
+    tokenBudget: 500,
+  }
+
+  const entries = Object.values(json.entries)
+    .sort((l, r) => l.uid - r.uid)
+    .map<AppSchema.MemoryEntry>((entry, i) => ({
+      priority: 0,
+      weight: 0,
+      comment: '',
+      constant: entry.constant,
+      id: i,
+      name: entry.comment,
+      keywords: entry.key,
+      entry: entry.content,
+      enabled: !entry.disable,
+
+      // V2
+      position: entry.position,
+      excludeRecursion: entry.preventRecursion,
+      probability: entry.probability,
+      useProbability: entry.useProbability,
+      secondaryKeys: entry.keysecondary,
+      selective: entry.selective,
+      selectiveLogic: entry.selectiveLogic,
+    }))
+
+  base.entries = entries
+
+  return base
 }

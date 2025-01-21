@@ -3,10 +3,13 @@ import { loggedIn } from '../auth'
 import {
   changePassword,
   createApiKey,
+  linkGoogleAccount,
   login,
+  oathGoogleLogin,
   register,
   remoteLogin,
   resyncPatreon,
+  unlinkGoogleAccount,
   unlinkPatreon,
   verifyOauthKey,
   verifyPatreonOauth,
@@ -20,6 +23,7 @@ import {
   updateTemplate,
   deleteTemplate,
   getPromptTemplates,
+  deleteUserPresetKey,
 } from './presets'
 import { hordeStats, novelLogin, openRouterModels, updateService } from './services'
 import {
@@ -40,12 +44,17 @@ import {
   updatePartialConfig,
   revealApiKey,
   generateApiKey,
+  removeProfileAvatar,
+  deleteFeatherlessKey,
 } from './settings'
 import { deleteUserAccount } from './delete-user'
 
 const router = Router()
 
 router.post('/login/callback', loggedIn, remoteLogin)
+router.post('/login/google', oathGoogleLogin)
+router.post('/link-google', loggedIn, linkGoogleAccount)
+router.post('/unlink-google', loggedIn, unlinkGoogleAccount)
 router.post('/login', login)
 router.post('/register', register)
 router.post('/services/novel', novelLogin)
@@ -60,6 +69,7 @@ router.get('/init', loggedIn, getInitialLoad)
 router.get('/', loggedIn, getProfile)
 router.get('/presets', loggedIn, getUserPresets)
 router.get('/templates', loggedIn, getPromptTemplates)
+router.delete('/presets/:id/key', loggedIn, deleteUserPresetKey)
 router.get('/config', loggedIn, getConfig)
 router.post('/config/service/:service', loggedIn, updateService)
 router.post('/config/reveal-key', loggedIn, revealApiKey)
@@ -73,12 +83,14 @@ router.delete('/config/mistral', loggedIn, deleteMistralKey)
 router.delete('/config/claude', loggedIn, deleteClaudeKey)
 router.delete('/config/third-party', loggedIn, deleteThirdPartyPassword)
 router.delete('/config/elevenlabs', loggedIn, deleteElevenLabsKey)
+router.delete('/config/featherless', loggedIn, deleteFeatherlessKey)
 router.delete('/presets/:id', loggedIn, deleteUserPreset)
 router.post('/password', loggedIn, changePassword)
 router.post('/ui', loggedIn, updateUI)
 router.post('/config/partial', loggedIn, updatePartialConfig)
 router.post('/config', loggedIn, updateConfig)
 router.post('/profile', loggedIn, updateProfile)
+router.delete('/profile/avatar', loggedIn, removeProfileAvatar)
 router.post('/presets', loggedIn, createUserPreset)
 router.post('/presets/:id', loggedIn, updateUserPreset)
 router.post('/templates', loggedIn, createTemplate)

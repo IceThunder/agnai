@@ -1,10 +1,11 @@
 import { Check, X } from 'lucide-solid'
-import { Component, Show, createEffect, createSignal } from 'solid-js'
+import { Component, For, Show, createEffect, createSignal } from 'solid-js'
 import Button from '../../shared/Button'
 import Modal from '../../shared/Modal'
 import TextInput from '../../shared/TextInput'
 import { NewCharacter, characterStore, toastStore } from '../../store'
 import Loading from '/web/shared/Loading'
+import { Pill } from '/web/shared/Card'
 
 const ChubImportCharModal: Component<{
   show: boolean
@@ -83,13 +84,24 @@ const ChubImportCharModal: Component<{
               value={char()?.name}
               onChange={(e) => setChar({ ...char(), name: e.currentTarget.value })}
             />
+
+            <div class="my-1 flex flex-wrap justify-center gap-2">
+              <For each={props.char?.tags || []}>
+                {(item) => (
+                  <Pill small type="hl">
+                    {item}
+                  </Pill>
+                )}
+              </For>
+            </div>
+
             <TextInput
               isMultiline
               fieldName="greeting"
               label="Greeting"
               value={char()?.greeting}
               class="text-xs"
-              onKeyUp={(e) => setChar({ ...char(), greeting: e.currentTarget.value })}
+              onChange={(e) => setChar({ ...char(), greeting: e.currentTarget.value })}
             />
 
             <TextInput
@@ -98,7 +110,7 @@ const ChubImportCharModal: Component<{
               label="Scenario"
               value={char()?.scenario}
               class="text-xs"
-              onKeyUp={(e) => setChar({ ...char(), scenario: e.currentTarget.value })}
+              onChange={(e) => setChar({ ...char(), scenario: e.currentTarget.value })}
             />
 
             <TextInput
@@ -107,7 +119,7 @@ const ChubImportCharModal: Component<{
               label="Sample Chat"
               value={char()?.sampleChat}
               class="text-xs"
-              onKeyUp={(e) => setChar({ ...char(), sampleChat: e.currentTarget.value })}
+              onChange={(e) => setChar({ ...char(), sampleChat: e.currentTarget.value })}
             />
 
             <TextInput
@@ -116,7 +128,7 @@ const ChubImportCharModal: Component<{
               label="Persona"
               value={char()?.persona.attributes.text[0]! || ''}
               class="text-xs"
-              onKeyUp={(e) => {
+              onChange={(e) => {
                 setChar({
                   ...char(),
                   persona: {

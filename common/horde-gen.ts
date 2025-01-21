@@ -1,8 +1,14 @@
+import crypto from 'crypto'
 import { AppSchema } from './types/schema'
 import { defaultPresets } from './default-preset'
 import { SD_SAMPLER } from './image'
 import { toArray } from './util'
-import type { AppLog } from '/srv/logger'
+import type { AppLog } from '../srv/middleware'
+import { v4 } from 'uuid'
+
+export const HORDE_SEED = v4()
+
+const ALGO = 'aes256'
 
 const HORDE_GUEST_KEY = '0000000000'
 const baseUrl = 'https://aihorde.net/api/v2'
@@ -11,7 +17,7 @@ export const defaults = {
   image: {
     sampler: SD_SAMPLER['DPM++ 2M'],
     model: 'Deliberate',
-    negative: `disfigured, ugly, deformed, poorly, censor, censored, blurry, lowres, fused, malformed, watermark, misshapen, duplicated, grainy, distorted, signature`,
+    negative: ``,
   },
 }
 
@@ -26,7 +32,7 @@ type Fetcher = <T = any>(
   opts: FetchOpts
 ) => Promise<{ statusCode?: number; statusMessage?: string; body: T }>
 
-type HordeCheck = {
+export type HordeCheck = {
   generations: any[]
   done: boolean
   faulted: boolean
@@ -38,6 +44,8 @@ type HordeCheck = {
   kudos: number
   wait_time: number
   message?: string
+  processing: number
+  shared: boolean
 }
 
 let TIMEOUT_SECS = Infinity
@@ -86,12 +94,14 @@ type GenerateOpts = {
   payload: any
   timeoutSecs?: number
   key: string
+  onTick?: (status: HordeCheck) => void
 }
 
 export async function generateImage(
   user: AppSchema.User,
   prompt: string,
   negative: string,
+  onTick: (status: HordeCheck) => void,
   log: AppLog = logger
 ) {
   const base = user.images
@@ -100,10 +110,11 @@ export async function generateImage(
   const payload = {
     prompt: `${prompt.slice(0, 500)} ### ${negative}`,
     params: {
-      height: base?.height ?? 384,
-      width: base?.width ?? 384,
+      height: base?.height ?? 1024,
+      width: base?.width ?? 1024,
       cfg_scale: base?.cfg ?? 9,
-      seed: Math.trunc(Math.random() * 1_000_000_000).toString(),
+      clip_skip: base?.clipSkip,
+      denoising_strength: 1,
       karras: false,
       n: 1,
       post_processing: [],
@@ -121,7 +132,24 @@ export async function generateImage(
   log?.debug({ ...payload, prompt: null }, 'Horde payload')
   log?.debug(`Prompt:\n${payload.prompt}`)
 
-  const image = await generate({ type: 'image', payload, key: user.hordeKey || HORDE_GUEST_KEY })
+  let key = user.hordeKey
+  if (!key) {
+    key = HORDE_GUEST_KEY
+  } else {
+    key = decryptText(user.hordeKey)
+  }
+
+  const image = await generate({
+    type: 'image',
+    payload,
+    key,
+    onTick,
+  })
+
+  if (!image.text.startsWith('data:') && typeof window !== 'undefined') {
+    image.text = `data:image/image;base64,${image.text}`
+  }
+
   return image
 }
 
@@ -155,6 +183,7 @@ export async function generateText(
     top_k: preset.topK ?? defaultPresets.horde.topK,
     top_p: preset.topP ?? defaultPresets.horde.topP,
     typical: preset.typicalP ?? defaultPresets.horde.typicalP,
+    min_p: preset.minP,
     max_context_length: Math.min(
       preset.maxContextLength ?? defaultPresets.horde.maxContextLength,
       2048
@@ -164,6 +193,9 @@ export async function generateText(
     rep_pen_slope: preset.repetitionPenaltySlope,
     tfs: preset.tailFreeSampling ?? defaultPresets.horde.tailFreeSampling,
     temperature: Math.min(preset.temp ?? defaultPresets.horde.temp, 5),
+    smoothing_factor: preset.smoothingFactor,
+    dynatemp_range: preset.dynatemp_range,
+    dynatemp_exponent: preset.dynatemp_exponent,
   }
 
   if (preset.order) {
@@ -206,7 +238,7 @@ async function generate(opts: GenerateOpts) {
       ? `${baseUrl}/generate/text/status/${init.body.id}`
       : `${baseUrl}/generate/status/${init.body.id}`
 
-  const result = await poll(url, opts.key, opts.type === 'text' ? 2.5 : 6.5)
+  const result = await poll(url, opts.key, opts.type === 'text' ? 2.5 : 6.5, opts.onTick)
 
   if (!result.generations || !result.generations.length) {
     const error: any = new Error(`Horde request failed: No generation received`)
@@ -218,7 +250,12 @@ async function generate(opts: GenerateOpts) {
   return { text, result }
 }
 
-async function poll(url: string, key: string | undefined, interval = 6.5) {
+async function poll(
+  url: string,
+  key: string | undefined,
+  interval: number,
+  onTick?: (status: HordeCheck) => void
+) {
   const started = Date.now()
   const threshold = TIMEOUT_SECS * 1000
 
@@ -237,6 +274,10 @@ async function poll(url: string, key: string | undefined, interval = 6.5) {
       throw error
     }
 
+    if (!res.body.generations?.length) {
+      onTick?.(res.body)
+    }
+
     if (res.body.faulted) {
       throw new Error(`Horde request failed: The worker faulted while generating.`)
     }
@@ -251,6 +292,16 @@ async function poll(url: string, key: string | undefined, interval = 6.5) {
 
 function wait(secs: number) {
   return new Promise((resolve) => setTimeout(resolve, secs * 1000))
+}
+
+function decryptText(text: string) {
+  try {
+    const decipher = crypto.createDecipher(ALGO, HORDE_SEED)
+    const decrypted = decipher.update(text, 'hex', 'utf8') + decipher.final('utf8')
+    return decrypted
+  } catch (ex) {
+    return text
+  }
 }
 
 export type FindUserResponse = {
